@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "stalebot",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["server.py"],
+      "port": 8000
+    },
+    {
+      "name": "streamlit",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "streamlit", "run", "app.py", "--server.headless", "true", "--server.address", "localhost", "--server.port", "8501"],
+      "port": 8501
+    }
+  ]
+}

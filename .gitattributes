@@ -1,0 +1,7 @@
+# Keep LF line endings everywhere: the app deploys to Linux (Docker, Procfile, .python-version
+# break with Windows CRLF endings). Editors on Windows handle LF fine.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.ico binary
