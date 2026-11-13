@@ -12,6 +12,7 @@ Missing evidence never counts as "stale": weak or conflicting evidence is report
 |---|---|---|
 | Dashboard + JSON API | `server.py`, `static/` | 8000 |
 | Optional Streamlit UI | `app.py` | 8501 |
+| Full dashboard in Streamlit (same look as port 8000) | `streamlit_dashboard.py` | 8502 |
 | Detection pipeline (shared) | `detector.py` | — |
 | Access control, rate limits, headers (shared) | `security.py` | — |
 
