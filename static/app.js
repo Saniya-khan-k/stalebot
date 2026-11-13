@@ -280,12 +280,13 @@
     if (!s) return;
     const g = $("#gatewayValue");
     const gw = {
-      connected: ["Connected", "ok"], unavailable: ["Unreachable", "bad"], missing: ["Not configured", "warn"],
+      connected: [s.gateway.provider === "groq" ? "Connected · Groq direct" : "Connected", "ok"],
+      unavailable: ["Offline", "bad"], missing: ["Not set up", "warn"],
       checking: ["Checking…", "busy idle"], unknown: ["Not checked", "idle"],
     }[s.gateway.state] || ["Unknown", "idle"];
     g.textContent = gw[0];
     g.className = `state ${gw[1]}`;
-    $("#gatewayCard").title = `Bifrost gateway${s.gateway.base_url ? " · " + s.gateway.base_url : ""}` + (s.gateway.checked_at ? `\nLast checked ${timeAgo(s.gateway.checked_at)}` : "") + "\nClick to re-check";
+    $("#gatewayCard").title = (s.gateway.provider === "groq" ? "Bifrost gateway is down — running on the direct Groq fallback" : `Bifrost gateway${s.gateway.base_url ? " · " + s.gateway.base_url : ""}`) + (s.gateway.checked_at ? `\nLast checked ${timeAgo(s.gateway.checked_at)}` : "") + "\nClick to re-check";
     const gIcon = $("#gatewayCard .sc-icon");
     gIcon.className = "sc-icon " + ({ ok: "c-green", bad: "c-red", warn: "c-amber" }[gw[1]] || "c-slate");
 
@@ -398,6 +399,14 @@
       toast("Enter a headline, claim or AI answer to verify.", "warn");
       input.focus();
       return;
+    }
+    if (state.status && state.status.gateway.state === "unavailable") {
+      toast("The analysis service was offline — checking again…", "info");
+      await refreshStatus(true);
+      if (state.status?.gateway.state !== "connected") {
+        toast("StaleBot's analysis service is still offline. Please try again in a minute.", "warn");
+        return;
+      }
     }
     setAnalyzing(true);
     showLoading();
@@ -866,6 +875,7 @@
     $("#gatewayKv").innerHTML = `
       <dt>Base URL</dt><dd>${c.base_url ? esc(c.base_url) : '<span class="muted">Hidden (admin only)</span>'}</dd>
       <dt>Virtual key</dt><dd>${yes(c.gateway_key_configured)}</dd>
+      <dt>Groq fallback</dt><dd>${c.groq_fallback_configured ? '<span class="state ok">Configured</span>' : '<span class="state warn">Not set (GROQ_API_KEY)</span>'}</dd>
       <dt>Status</dt><dd>${esc($("#gatewayValue").textContent)}${s && s.gateway.checked_at ? ` · checked ${timeAgo(s.gateway.checked_at)}` : ""}</dd>
       <dt>.env default model</dt><dd>${esc(c.default_model)}</dd>`;
     if (s) $("#settingsModel").innerHTML = s.model.options.map((o) => `<option value="${esc(o.id)}" ${o.id === s.model.selected ? "selected" : ""}>${esc(o.label)} — ${esc(o.id)}</option>`).join("");

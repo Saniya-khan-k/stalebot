@@ -1,7 +1,10 @@
-import json
-import os
+"""StaleBot — Streamlit UI.
+
+Run locally:  python -m streamlit run app.py
+On Streamlit Community Cloud, put the keys from .env.example into the app's Secrets.
+"""
 import html
-from datetime import datetime
+import os
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -9,295 +12,371 @@ from dotenv import load_dotenv
 import streamlit as st
 
 from detector import (
-    STATUS_COLORS,
+    ERR_NOT_CONFIGURED,
+    ERR_OFFLINE,
     analyze_text,
     build_reports,
-    check_bifrost,
+    check_service,
     get_settings,
+    llm_routes,
     summarize,
 )
 from security import ROLE_ADMIN, SecurityConfig, concurrency_gate, limiter, role_for_token
 
-
 load_dotenv(dotenv_path=Path(__file__).with_name(".env"), override=True)
 
-st.set_page_config(page_title="StaleBot · Stale-Answer Detector", page_icon="🛡️", layout="wide", initial_sidebar_state="expanded")
+# "auto" = sidebar open on desktop, collapsed on phones.
+st.set_page_config(
+    page_title="StaleBot · Stale-Answer Detector", page_icon="🛡️", layout="wide",
+    initial_sidebar_state="auto",
+)
 
-PRESETS = {
-    "Outdated Technology Stack": "Python 3.9 is the latest stable release of Python. React 17 is the latest major release of React. Node.js 18 is currently an Active LTS release.",
-    "Historic AI API Pricing": "GPT-4 Turbo is the latest model in the GPT-4 family. GPT-4 Turbo API pricing is $10 per million input tokens and $30 per million output tokens.",
-    "Mixed Claims to Verify (2026)": "Python 3.14 was released in 2025. React 17 is the latest major release of React. Node.js 24 is an Active LTS release. GPT-4 Turbo API pricing is $10 per million input tokens and $30 per million output tokens.",
-    "Custom Analysis": "",
-}
-PRESET_NOTES = {
-    "Outdated Technology Stack": "Version and lifecycle claims; verify each one live.",
-    "Historic AI API Pricing": "Historical claims, not assumed current.",
-    "Mixed Claims to Verify (2026)": "Mixed candidates; none are pre-verified.",
-    "Custom Analysis": "Enter your own text.",
-}
+
+def load_streamlit_secrets():
+    """Streamlit Cloud keeps keys in st.secrets; copy top-level values into the environment so the
+    shared detector/security code (which reads os.environ) sees them. Real env vars win."""
+    try:
+        items = dict(st.secrets)
+    except Exception:  # no secrets file locally
+        return
+    for key, value in items.items():
+        if isinstance(value, (str, int, float, bool)) and not os.environ.get(key):
+            os.environ[key] = str(value)
+
+
+load_streamlit_secrets()
+
+# ---------------------------------------------------------------------------- styles
+# Injected first, before any widget, so nothing renders unstyled.
 st.session_state.setdefault("theme", "Dark")
-if st.session_state["theme"] not in {"Dark", "Light"}:
-    st.session_state["theme"] = "Dark"
-
-
-def set_theme(theme_name):
-    st.session_state["theme"] = theme_name
-
-
-def set_active_view(view_name):
-    st.session_state["active_view"] = view_name
-
-
-ICONS = {
-    "shield": '<path d="M12 3 19 6v5c0 4.5-2.8 7.6-7 10-4.2-2.4-7-5.5-7-10V6l7-3Z"/><path d="m9 12 2 2 4-4"/>',
-    "dashboard": '<rect x="3" y="3" width="8" height="8" rx="2"/><rect x="13" y="3" width="8" height="5" rx="2"/><rect x="13" y="10" width="8" height="11" rx="2"/><rect x="3" y="13" width="8" height="8" rx="2"/>',
-    "analytics": '<path d="M4 19V5"/><path d="M4 19h17"/><rect x="7" y="11" width="3" height="5" rx="1"/><rect x="13" y="7" width="3" height="9" rx="1"/><rect x="19" y="4" width="2" height="12" rx="1"/>',
-    "presets": '<path d="m12 3 1.4 5.6L19 10l-5.6 1.4L12 17l-1.4-5.6L5 10l5.6-1.4L12 3Z"/><path d="m19 15 .7 2.3L22 18l-2.3.7L19 21l-.7-2.3L16 18l2.3-.7L19 15Z"/>',
-    "bolt": '<path d="m13 2-3 9h7L9 22l3-9H5l8-11Z"/>',
-    "model": '<rect x="4" y="4" width="16" height="16" rx="3"/><path d="M9 9h6v6H9zM9 1v3m6-3v3M9 20v3m6-3v3M1 9h3m-3 6h3m16-6h3m-3 6h3"/>',
-    "search": '<path d="M10.5 18a7.5 7.5 0 1 1 0-15 7.5 7.5 0 0 1 0 15Z"/><path d="m16 16 5 5"/><path d="m10.5 7 .8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8.8-2.2Z"/>',
-    "wand": '<path d="m15 4 5 5M3 21l12-12M6 3l.8 2.2L9 6l-2.2.8L6 9l-.8-2.2L3 6l2.2-.8L6 3Zm12 10 .8 2.2L21 16l-2.2.8L18 19l-.8-2.2L15 16l2.2-.8L18 13Z"/>',
-}
-
-
-def icon_svg(name):
-    return f'<svg viewBox="0 0 24 24" aria-hidden="true">{ICONS[name]}</svg>'
+LIGHT = st.session_state["theme"] == "Light"
 
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
-:root{--page:#070B18;--sidebar:#0B1024;--panel:#10172B;--raised:#151D35;--blue:#2563EB;--electric:#3B82F6;--violet:#7C3AED;--cyan:#22D3EE;--green:#10B981;--rose:#EF4444;--amber:#F59E0B;--text:#F8FAFC;--muted:#94A3B8;--line:rgba(99,130,255,.18)}
-html,body,[class*="css"]{font-family:'Inter',sans-serif;letter-spacing:0}
-[data-testid="stAppViewContainer"],[data-testid="stApp"]{color:var(--text)!important;background:radial-gradient(760px 420px at 82% -8%,rgba(37,99,235,.16),transparent 65%),radial-gradient(620px 360px at 50% 12%,rgba(124,58,237,.07),transparent 68%),var(--page)!important}
-[data-testid="stHeader"]{background:transparent}[data-testid="stSidebar"]{min-width:286px;max-width:286px;background:var(--sidebar);border-right:1px solid var(--line)}
+:root{--page:#070B18;--sidebar:#0B1024;--panel:#10172B;--raised:#151D35;--input:#0A1022;--blue:#2563EB;--violet:#7C3AED;--cyan:#22D3EE;--green:#10B981;--rose:#EF4444;--amber:#F59E0B;--text:#F8FAFC;--muted:#94A3B8;--line:rgba(99,130,255,.2);
+--v-verified:#34D399;--v-partial:#FBBF24;--v-stale:#C084FC;--v-false:#FB7185;--v-unclear:#94A3B8}
+/* Text font only: icon fonts (Material Symbols) keep their own family. */
+html,body,.stApp,.stMarkdown,p,label,input,textarea,button,h1,h2,h3,h4{font-family:'Inter',sans-serif;letter-spacing:0}
+[data-testid="stAppViewContainer"],[data-testid="stApp"]{color:var(--text);background:radial-gradient(760px 420px at 82% -8%,rgba(37,99,235,.16),transparent 65%),radial-gradient(620px 360px at 50% 12%,rgba(124,58,237,.07),transparent 68%),var(--page)!important}
+[data-testid="stHeader"]{background:transparent}
+[data-testid="stSidebar"]{background:var(--sidebar);border-right:1px solid var(--line)}
 [data-testid="stMainMenu"]{display:none!important}
-.block-container{max-width:1420px;padding-top:1.8rem;padding-bottom:4rem}h1,h2,h3{font-family:'Inter',sans-serif;letter-spacing:0}
-h1{font-size:2.05rem!important;line-height:1.2!important;font-weight:800!important}h2{font-size:1.22rem!important;font-weight:700!important}p,label{color:var(--muted)}
-.hero{padding:.3rem 0 1.2rem}.hero-kicker,.section-kicker{color:#9BBEFF;font-size:.73rem;font-weight:700;text-transform:uppercase;letter-spacing:1px}.hero h1{margin:.55rem 0 .45rem;color:var(--text)}.hero-copy{max-width:780px;color:var(--muted);font-size:1rem;line-height:1.65}
-.status-chip{display:flex;align-items:center;gap:.55rem;min-height:43px;padding:.6rem .75rem;border:1px solid var(--line);border-radius:10px;background:rgba(21,30,48,.76);color:var(--muted);font-size:.78rem}.status-dot{width:7px;height:7px;border-radius:50%;flex:0 0 7px;background:#64748B}.status-dot.ok{background:var(--green)}.status-dot.warn{background:var(--amber)}.status-dot.bad{background:var(--rose)}.status-chip strong{color:var(--text);font-weight:600}
-.kpi-card{height:128px;padding:1rem;border:1px solid var(--line);border-radius:12px;background:linear-gradient(145deg,rgba(25,36,58,.92),rgba(21,30,48,.88));box-shadow:0 12px 30px rgba(0,0,0,.14);transition:border-color .18s ease,transform .18s ease}.kpi-card:hover{border-color:rgba(96,165,250,.38);transform:translateY(-2px)}.kpi-label{color:var(--muted);font-size:.78rem;font-weight:600}.kpi-value{margin-top:.5rem;color:var(--text);font-family:'Space Grotesk',sans-serif;font-size:1.9rem;font-weight:700}.kpi-meta{margin-top:.4rem;color:#8292AA;font-size:.72rem}
-.section-heading{display:flex;align-items:end;justify-content:space-between;gap:1rem;margin:1.7rem 0 .8rem}.section-heading h2{margin:0;color:var(--text)}.status-badge{display:inline-block;padding:.28rem .58rem;border-radius:999px;font-size:.68rem;font-weight:700;letter-spacing:.45px}.status-fresh{color:#9AF0D1;background:rgba(52,211,153,.12);border:1px solid rgba(52,211,153,.25)}.status-stale{color:#FFB1BE;background:rgba(251,113,133,.12);border:1px solid rgba(251,113,133,.25)}.status-unverified{color:#FCD58A;background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.25)}
-.evidence-label{margin:.8rem 0 .2rem;color:#CBD5E1;font-size:.74rem;font-weight:700;text-transform:uppercase;letter-spacing:.45px}.empty-state{padding:1.4rem;border:1px dashed rgba(148,163,184,.25);border-radius:12px;background:rgba(21,30,48,.45)}.empty-mark{width:34px;height:34px;display:grid;place-items:center;margin-bottom:.8rem;border-radius:9px;color:#A8C8FF;background:rgba(59,130,246,.13)}
-hr{border-color:var(--line)!important}.stButton>button,[data-testid="stFormSubmitButton"]>button{min-height:2.55rem;border:1px solid var(--line);border-radius:9px;color:var(--text);background:var(--raised);font-weight:650;transition:filter .16s ease,transform .16s ease,background .16s ease}.stButton>button:hover,[data-testid="stFormSubmitButton"]>button:hover{filter:brightness(1.12);transform:translateY(-1px)}
-button[kind*="primary"],button[data-testid*="primary"]{color:#FFFFFF!important;background:linear-gradient(100deg,var(--blue),var(--violet))!important}
+.block-container{max-width:1240px;padding-top:1.8rem;padding-bottom:3rem}
+p,label{color:var(--muted)}
+hr{border-color:var(--line)!important}
+
+/* All inline SVG icons */
+.ico{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;flex:0 0 auto}
+
+/* Inputs: dark surfaces, readable text, visible focus */
+[data-baseweb="textarea"],[data-baseweb="base-input"],[data-baseweb="input"]{background:var(--input)!important;border-color:var(--line)!important;border-radius:10px!important}
+[data-testid="stTextArea"] textarea,[data-testid="stTextInput"] input{color:var(--text)!important;background:var(--input)!important;caret-color:var(--text);font-size:.92rem;line-height:1.6}
+[data-testid="stTextArea"] textarea::placeholder{color:var(--muted)!important;opacity:1}
+[data-baseweb="textarea"]:focus-within{border-color:#8B5CF6!important;box-shadow:0 0 0 2px rgba(139,92,246,.22)}
+[data-testid="stSelectbox"] div[data-baseweb="select"]>div{color:var(--text);background:var(--input);border-color:var(--line);border-radius:10px}
+/* Dropdown menus render in a portal, outside the sidebar, so style them globally */
+[data-baseweb="popover"] ul[role="listbox"],[data-baseweb="popover"] [data-baseweb="menu"]{background:var(--panel)!important;border:1px solid var(--line)!important}
+[data-baseweb="popover"] li[role="option"]{color:var(--text)!important;background:transparent!important}
+[data-baseweb="popover"] li[role="option"]:hover,[data-baseweb="popover"] li[aria-selected="true"]{background:rgba(124,58,237,.22)!important}
+
+/* Buttons */
+.stButton>button,[data-testid="stFormSubmitButton"]>button,[data-testid="stDownloadButton"]>button{min-height:2.55rem;border:1px solid var(--line);border-radius:10px;color:var(--text);background:var(--raised);font-weight:650;transition:filter .16s ease,transform .16s ease}
+.stButton>button:hover:not(:disabled),[data-testid="stFormSubmitButton"]>button:hover:not(:disabled){filter:brightness(1.12);transform:translateY(-1px)}
+button[kind*="primary"],button[data-testid*="primary"]{color:#FFFFFF!important;background:linear-gradient(100deg,var(--blue),var(--violet))!important;border:0!important}
 button[kind*="primary"] *,button[data-testid*="primary"] *{color:#FFFFFF!important}
-.st-key-theme_dark_button button[kind="primary"],.st-key-theme_light_button button[kind="primary"]{color:#FFFFFF!important;background:linear-gradient(100deg,#2563EB,#3B82F6)!important;border-color:rgba(96,165,250,.55)!important}
-.st-key-theme_dark_button button[kind="secondary"],.st-key-theme_light_button button[kind="secondary"]{color:var(--muted)!important;background:var(--panel)!important;border-color:var(--line)!important}
-[data-testid="stTextArea"] textarea,[data-testid="stSelectbox"] div[data-baseweb="select"]>div{color:var(--text);background:var(--panel);border-color:var(--line);border-radius:9px}[data-testid="stVerticalBlockBorderWrapper"]{border-color:var(--line)!important;border-radius:14px!important;background:var(--panel)}[data-testid="stExpander"]{border-color:var(--line);border-radius:9px;background:var(--panel)}[data-testid="stProgressBar"]>div>div{background:linear-gradient(90deg,var(--blue),var(--violet))}
-[data-testid="stAlert"]{box-sizing:border-box!important;height:auto!important;min-height:0!important;max-height:none!important;overflow:visible!important;padding:16px!important;border:1px solid var(--line)!important;border-radius:12px!important;color:var(--text)!important;background:var(--raised)!important}
-[data-testid="stAlert"]>div,[data-testid="stAlert"] [data-testid="stMarkdownContainer"]{box-sizing:border-box!important;height:auto!important;min-height:0!important;max-height:none!important;overflow:visible!important;color:var(--text)!important}
-[data-testid="stAlert"] p{margin:0!important;color:inherit!important;line-height:1.55!important;white-space:normal!important;overflow-wrap:anywhere}
-.brand-lockup{display:flex;align-items:center;gap:11px;margin:0 0 1.5rem}.brand-mark{width:38px;height:38px;display:grid;place-items:center;border:1px solid rgba(59,130,246,.32);border-radius:12px;color:#93C5FD;background:linear-gradient(145deg,rgba(37,99,235,.24),rgba(124,58,237,.16));box-shadow:0 0 22px rgba(37,99,235,.13)}.brand-mark svg,.nav-item svg,.hero-art svg,.status-icon svg,.input-title svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}.brand-name{color:var(--text);font-size:.91rem;font-weight:750}.brand-tagline{margin-top:2px;color:var(--muted);font-size:.68rem}
-.sidebar-label{margin:1.25rem 0 .55rem;color:#64748B;font-size:.67rem;font-weight:700;text-transform:uppercase;letter-spacing:1px}.nav-item{display:flex;align-items:center;gap:11px;padding:.7rem .78rem;border:1px solid transparent;border-radius:9px;color:var(--muted);font-size:.82rem;font-weight:600}.nav-item.active{color:#fff;background:linear-gradient(105deg,rgba(37,99,235,.95),rgba(124,58,237,.88));box-shadow:0 8px 24px rgba(37,99,235,.2)}
-.step-row{display:flex;gap:.7rem;margin:.75rem 0;padding-bottom:.7rem;border-bottom:1px solid var(--line)}.step-row:last-child{border-bottom:0}.step-num{width:27px;height:27px;display:grid;place-items:center;flex:0 0 27px;border:1px solid rgba(59,130,246,.26);border-radius:8px;color:#93C5FD;background:rgba(37,99,235,.1);font-size:.68rem;font-weight:750}.step-copy{color:var(--muted);font-size:.72rem;line-height:1.5}.step-copy strong{display:block;margin-bottom:2px;color:#E2E8F0;font-size:.75rem}
-.st-key-theme_dark_button button[kind="primary"],.st-key-theme_light_button button[kind="primary"]{color:#fff!important;background:linear-gradient(100deg,var(--blue),var(--violet))!important;border-color:rgba(99,130,255,.48)!important}
-.st-key-theme_dark_button button[kind="secondary"],.st-key-theme_light_button button[kind="secondary"]{color:var(--muted)!important;background:var(--panel)!important;border-color:var(--line)!important}
-.st-key-nav_dashboard button[kind="primary"],.st-key-nav_analytics button[kind="primary"],.st-key-nav_presets button[kind="primary"]{color:#fff!important;background:linear-gradient(105deg,rgba(37,99,235,.95),rgba(124,58,237,.88))!important;border-color:rgba(99,130,255,.28)!important;box-shadow:0 8px 24px rgba(37,99,235,.2)}
-.hero-shell{position:relative;overflow:hidden;padding:1.3rem 1.45rem;border:1px solid var(--line);border-radius:16px;background:linear-gradient(115deg,rgba(16,23,43,.96),rgba(21,29,53,.8));box-shadow:0 18px 48px rgba(0,0,0,.18)}.hero-shell:after{position:absolute;right:-60px;top:-150px;width:340px;height:300px;border-radius:50%;background:radial-gradient(circle,rgba(59,130,246,.19),transparent 68%);content:"";pointer-events:none}.hero-title{margin:.45rem 0;color:var(--text);font-size:2rem;font-weight:800;line-height:1.15}.hero-title span{color:#93C5FD;background:linear-gradient(90deg,#60A5FA,#A78BFA,#22D3EE);background-clip:text;-webkit-text-fill-color:transparent}.hero-copy{max-width:690px;color:var(--muted);font-size:.87rem;line-height:1.65}.hero-art{position:relative;z-index:1;width:90px;height:90px;display:grid;place-items:center;margin:auto;border:1px solid rgba(59,130,246,.3);border-radius:26px;color:#BFDBFE;background:linear-gradient(145deg,rgba(37,99,235,.25),rgba(124,58,237,.16));box-shadow:0 0 48px rgba(37,99,235,.18)}.hero-art svg{width:46px;height:46px}
-.status-card{display:flex;align-items:center;gap:12px;min-height:78px;padding:.9rem 1rem;border:1px solid var(--line);border-radius:12px;background:linear-gradient(145deg,var(--panel),rgba(21,29,53,.76));transition:transform .18s ease,border-color .18s ease}.status-card:hover{transform:translateY(-2px);border-color:rgba(59,130,246,.38)}.status-icon{width:38px;height:38px;display:grid;place-items:center;flex:0 0 38px;border:1px solid var(--line);border-radius:11px;color:#93C5FD;background:rgba(59,130,246,.1)}.status-title{color:var(--muted);font-size:.68rem}.status-value{overflow:hidden;margin-top:3px;color:var(--text);font-size:.78rem;font-weight:650;text-overflow:ellipsis;white-space:nowrap}.status-led{width:7px;height:7px;display:inline-block;margin-right:6px;border-radius:50%;background:var(--green)}
-.analysis-shell{padding:1.15rem 1.2rem;border:1px solid rgba(99,130,255,.22);border-radius:15px;background:linear-gradient(150deg,rgba(16,23,43,.96),rgba(21,29,53,.88));box-shadow:0 18px 42px rgba(0,0,0,.18)}.input-title{display:flex;align-items:center;gap:9px;color:var(--text);font-size:.96rem;font-weight:700}.input-title svg{color:#93C5FD}.analysis-shell [data-testid="stTextArea"] textarea{min-height:150px;padding:14px 15px;border-color:rgba(59,130,246,.35);background:rgba(7,11,24,.55);font-size:.88rem;line-height:1.6}.analysis-shell [data-testid="stTextArea"] textarea:focus{border-color:#3B82F6;box-shadow:0 0 0 2px rgba(59,130,246,.16)}.analysis-shell [data-testid="stFormSubmitButton"] button{min-height:47px;border:0;background:linear-gradient(100deg,#2563EB,#7C3AED,#0891B2);box-shadow:0 8px 22px rgba(37,99,235,.19);font-weight:700}.section-title{display:flex;align-items:center;gap:8px;margin:1.5rem 0 .7rem;color:var(--text);font-size:.96rem;font-weight:700}.section-title svg{width:17px;height:17px;fill:none;stroke:#60A5FA;stroke-width:1.8}
-.empty-state{display:flex;align-items:center;gap:15px;padding:1.15rem 1.25rem;border-style:solid}.empty-wave{width:46px;height:46px;display:grid;place-items:center;flex:0 0 46px;border:1px solid rgba(59,130,246,.24);border-radius:14px;color:#93C5FD;background:rgba(37,99,235,.1)}.empty-copy{color:var(--muted);font-size:.8rem;line-height:1.55}.empty-copy strong{display:block;margin-bottom:3px;color:var(--text);font-size:.88rem}
-.st-key-nav_dashboard button,.st-key-nav_analytics button,.st-key-nav_presets button{width:100%;text-align:left;border-radius:9px}.st-key-nav_dashboard button[kind="secondary"],.st-key-nav_analytics button[kind="secondary"],.st-key-nav_presets button[kind="secondary"]{color:var(--muted)!important;background:transparent!important;border-color:transparent!important;box-shadow:none!important}
-.nav-icon{width:34px;height:34px;display:grid;place-items:center;margin:auto;color:var(--muted);border-radius:9px}.nav-icon svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}.nav-icon.active{color:#fff}
-.st-key-navrow_dashboard_active,.st-key-navrow_analytics_active,.st-key-navrow_presets_active{border:1px solid rgba(99,130,255,.22);border-radius:10px;background:linear-gradient(100deg,rgba(37,99,235,.16),rgba(124,58,237,.11));box-shadow:0 6px 20px rgba(37,99,235,.08)}
-.st-key-analysis_card{margin:.85rem 0 1.1rem!important;padding:1.05rem 1.15rem!important;border:1px solid rgba(99,130,255,.24)!important;border-radius:15px!important;background:linear-gradient(145deg,var(--panel),var(--raised))!important;box-shadow:0 18px 45px rgba(0,0,0,.14)}
-.input-hint{margin:.3rem 0 .85rem;color:var(--muted);font-size:.76rem}.live-flag{display:flex;justify-content:flex-end;align-items:center;gap:7px;color:var(--muted);font-size:.64rem;font-weight:700;letter-spacing:.6px}.live-flag span{width:6px;height:6px;border-radius:50%;background:var(--green);box-shadow:0 0 10px rgba(16,185,129,.45)}
-.status-led.ok{background:var(--green);box-shadow:0 0 9px rgba(16,185,129,.4)}.status-led.warn{background:var(--amber)}.status-led.bad{background:var(--rose)}
-.st-key-analysis_card [data-testid="stTextArea"] textarea{background:rgba(7,11,24,.55)!important;color:var(--text)!important}
-@media(max-width:760px){[data-testid="stSidebar"]{min-width:0;max-width:none}.block-container{padding:1rem .85rem 2.5rem}h1{font-size:1.7rem!important}.hero-shell{padding:1rem}.hero-title{font-size:1.65rem}.hero-art{width:64px;height:64px;border-radius:19px}.hero-art svg{width:34px;height:34px}.status-card{min-height:72px;padding:.65rem}.status-value{font-size:.68rem}.kpi-card{height:116px}}
+button:disabled{opacity:.5!important;cursor:not-allowed!important;transform:none!important}
+
+[data-testid="stVerticalBlockBorderWrapper"]{border-color:var(--line)!important;border-radius:14px!important;background:var(--panel)}
+[data-testid="stExpander"]{border-color:var(--line);border-radius:10px;background:var(--panel)}
+[data-testid="stProgressBar"]>div>div{background:linear-gradient(90deg,var(--blue),var(--violet))}
+[data-testid="stAlert"] p{margin:0!important;line-height:1.55!important;overflow-wrap:anywhere}
+
+/* Sidebar: compact */
+[data-testid="stSidebar"] .block-container,[data-testid="stSidebarContent"]{padding-top:1rem}
+.brand-lockup{display:flex;align-items:center;gap:11px;margin:0 0 .6rem}
+.brand-mark{width:38px;height:38px;display:grid;place-items:center;border:1px solid rgba(59,130,246,.32);border-radius:12px;color:#93C5FD;background:linear-gradient(145deg,rgba(37,99,235,.24),rgba(124,58,237,.16))}
+.brand-name{color:var(--text);font-size:1rem;font-weight:800}.brand-tagline{margin-top:2px;color:var(--muted);font-size:.7rem}
+.sidebar-label{margin:1rem 0 .4rem;color:#64748B;font-size:.66rem;font-weight:700;text-transform:uppercase;letter-spacing:1px}
+.step-row{display:flex;gap:.65rem;margin:.55rem 0}.step-num{width:24px;height:24px;display:grid;place-items:center;flex:0 0 24px;border:1px solid rgba(59,130,246,.26);border-radius:7px;color:#93C5FD;background:rgba(37,99,235,.1);font-size:.66rem;font-weight:750}.step-copy{color:var(--muted);font-size:.72rem;line-height:1.45}.step-copy strong{display:block;color:#E2E8F0;font-size:.74rem}
+
+/* Hero */
+.hero-shell{position:relative;overflow:hidden;display:flex;align-items:center;gap:1.2rem;padding:1.3rem 1.45rem;border:1px solid var(--line);border-radius:16px;background:linear-gradient(115deg,rgba(16,23,43,.96),rgba(21,29,53,.8))}
+.hero-text{flex:1;min-width:0}
+.hero-kicker{color:#9BBEFF;font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:1px}
+.hero-title{margin:.35rem 0;color:var(--text);font-size:2rem;font-weight:800;line-height:1.15}
+.hero-title span{background:linear-gradient(90deg,#60A5FA,#A78BFA,#22D3EE);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+.hero-copy{max-width:640px;color:var(--muted);font-size:.9rem;line-height:1.6}
+.hero-art{width:84px;height:84px;flex:0 0 84px;display:grid;place-items:center;border:1px solid rgba(96,165,250,.35);border-radius:24px;color:#BFDBFE;background:linear-gradient(145deg,rgba(37,99,235,.28),rgba(124,58,237,.2))}
+.hero-art .ico{width:44px;height:44px;stroke-width:1.6}
+
+/* Status cards: text wraps instead of being cut off; full text in the tooltip too */
+.status-card{display:flex;align-items:center;gap:12px;min-height:76px;height:100%;padding:.8rem .95rem;border:1px solid var(--line);border-radius:12px;background:linear-gradient(145deg,var(--panel),rgba(21,29,53,.76))}
+.status-icon{width:38px;height:38px;display:grid;place-items:center;flex:0 0 38px;border:1px solid var(--line);border-radius:11px;color:#93C5FD;background:rgba(59,130,246,.1)}
+.status-title{color:var(--muted);font-size:.7rem}
+.status-value{margin-top:3px;color:var(--text);font-size:.82rem;font-weight:650;line-height:1.35;overflow-wrap:anywhere}
+.status-led{width:7px;height:7px;display:inline-block;margin-right:6px;border-radius:50%;vertical-align:middle}
+.status-led.ok{background:var(--green);box-shadow:0 0 9px rgba(16,185,129,.45)}.status-led.warn{background:var(--amber)}.status-led.bad{background:var(--rose)}
+
+/* Offline banner */
+.offline-banner{display:flex;gap:12px;align-items:flex-start;padding:.9rem 1rem;border:1px solid rgba(239,68,68,.35);border-radius:12px;background:rgba(239,68,68,.08);color:var(--text)}
+.offline-banner.warn{border-color:rgba(245,158,11,.4);background:rgba(245,158,11,.08)}
+.offline-banner .ico{color:#F87171;margin-top:2px}.offline-banner.warn .ico{color:#FBBF24}
+.offline-banner strong{display:block;margin-bottom:2px}.offline-banner span{color:var(--muted);font-size:.84rem}
+
+/* Analyze card */
+.st-key-analysis_card{padding:1.05rem 1.15rem!important;border:1px solid rgba(124,58,237,.35)!important;border-radius:15px!important;background:linear-gradient(145deg,var(--panel),var(--raised))!important}
+.input-title{display:flex;align-items:center;gap:9px;color:var(--text);font-size:1rem;font-weight:700}.input-title .ico{color:#A78BFA}
+.input-hint{margin:.25rem 0 .7rem;color:var(--muted);font-size:.8rem}
+.live-flag{display:flex;justify-content:flex-end;align-items:center;gap:7px;color:var(--muted);font-size:.66rem;font-weight:700;letter-spacing:.6px}
+.live-flag span{width:6px;height:6px;border-radius:50%;background:var(--green);box-shadow:0 0 10px rgba(16,185,129,.45)}
+
+/* Results */
+.section-heading{margin:1.5rem 0 .7rem}.section-heading h2{margin:0;color:var(--text);font-size:1.15rem!important;font-weight:750!important}
+.kpi-card{height:118px;padding:1rem;border:1px solid var(--line);border-radius:12px;background:linear-gradient(145deg,rgba(25,36,58,.92),rgba(21,30,48,.88))}
+.kpi-label{color:var(--muted);font-size:.76rem;font-weight:600}.kpi-value{margin-top:.45rem;color:var(--text);font-size:1.8rem;font-weight:800}.kpi-meta{margin-top:.35rem;color:#8292AA;font-size:.72rem}
+.claim-card{padding:1rem 1.1rem;margin:.7rem 0;border:1px solid var(--line);border-left:4px solid var(--vc);border-radius:12px;background:var(--panel)}
+.claim-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.vbadge{display:inline-block;padding:.24rem .6rem;border-radius:999px;font-size:.7rem;font-weight:800;letter-spacing:.5px;color:var(--vc);background:color-mix(in srgb,var(--vc) 14%,transparent);border:1px solid color-mix(in srgb,var(--vc) 40%,transparent)}
+.claim-score{margin-left:auto;color:var(--muted);font-size:.78rem}.claim-score b{color:var(--text);font-size:1.05rem}
+.claim-text{margin:.55rem 0 .2rem;color:var(--text);font-weight:650;font-size:.98rem;line-height:1.45}
+.claim-now{color:var(--text);font-size:.9rem;line-height:1.5}.claim-now em{font-style:normal;color:var(--vc);font-weight:700}
+.v-verified{--vc:var(--v-verified)}.v-partial{--vc:var(--v-partial)}.v-stale{--vc:var(--v-stale)}.v-false{--vc:var(--v-false)}.v-unclear{--vc:var(--v-unclear)}
+.src-list{margin:.7rem 0 0;padding:0;list-style:none;display:grid;gap:.45rem}
+.src-list li{padding:.55rem .7rem;border:1px solid var(--line);border-radius:9px;font-size:.82rem}
+.src-list a{color:var(--text);font-weight:650;text-decoration:none}.src-list a:hover{color:#A78BFA;text-decoration:underline}
+.src-meta{display:block;margin-top:2px;color:var(--muted);font-size:.74rem}
+.src-none{color:var(--muted);font-size:.8rem;margin-top:.5rem}
+.example-tag{display:inline-block;margin-bottom:.4rem;padding:.2rem .55rem;border-radius:6px;font-size:.66rem;font-weight:800;letter-spacing:.7px;color:#C4B5FD;background:rgba(124,58,237,.16);border:1px solid rgba(167,139,250,.35)}
+.empty-state{display:flex;align-items:center;gap:15px;padding:1.05rem 1.2rem;border:1px solid var(--line);border-radius:12px;background:rgba(21,30,48,.45)}
+.empty-wave{width:46px;height:46px;display:grid;place-items:center;flex:0 0 46px;border:1px solid rgba(59,130,246,.24);border-radius:14px;color:#93C5FD;background:rgba(37,99,235,.1)}
+.empty-copy{color:var(--muted);font-size:.84rem;line-height:1.55}.empty-copy strong{display:block;margin-bottom:3px;color:var(--text);font-size:.9rem}
+
+/* Footer */
+.footer{margin-top:2.5rem;padding:1.1rem 0 .5rem;border-top:1px solid var(--line);color:var(--muted);font-size:.8rem;line-height:1.7}
+.footer strong{color:var(--text)}.footer a{color:#A78BFA;text-decoration:none}.footer a:hover{text-decoration:underline}
+.stack-chip{display:inline-block;margin:0 .3rem .3rem 0;padding:.1rem .5rem;border:1px solid var(--line);border-radius:999px;font-size:.72rem;color:var(--text)}
+
+@media(max-width:760px){
+ .block-container{padding:1rem .85rem 2.5rem}
+ .hero-shell{padding:1rem}.hero-title{font-size:1.6rem}.hero-art{width:60px;height:60px;flex-basis:60px;border-radius:18px}.hero-art .ico{width:32px;height:32px}
+ .kpi-card{height:auto}
+ .claim-score{margin-left:0;width:100%}
+}
 </style>
 """, unsafe_allow_html=True)
 
-if st.session_state["theme"] == "Light":
+if LIGHT:
     st.markdown("""
     <style>
-    :root{--page:#F8FAFC;--sidebar:#FFFFFF;--panel:#FFFFFF;--raised:#F1F5F9;--text:#0F172A;--muted:#64748B;--line:#E2E8F0}
-    [data-testid="stAppViewContainer"],[data-testid="stApp"]{color:var(--text)!important;background:var(--page)!important}
-    body,[data-testid="stSidebar"],[data-testid="stSidebar"]>div:first-child{color:var(--text)!important;background:var(--sidebar)!important}
-    h1,h2,h3,.hero h1,.section-heading h2{color:var(--text)}
-    p,label,.hero-copy,.kpi-label,.status-chip,.step-copy,.step-copy strong{color:var(--muted)}
-    .hero-kicker,.section-kicker,.step-num{color:#1D4ED8}
-    .status-fresh{color:#047857;background:rgba(52,211,153,.1);border-color:rgba(4,120,87,.24)}
-    .status-stale{color:#BE123C;background:rgba(251,113,133,.1);border-color:rgba(190,18,60,.22)}
-    .status-unverified{color:#B45309;background:rgba(245,158,11,.1);border-color:rgba(180,83,9,.22)}
-    [data-testid="stAlert"]{height:auto!important;min-height:0!important;max-height:none!important;overflow:visible!important;padding:16px!important;color:#0F172A!important;background:#FFFFFF!important;border-color:#E2E8F0!important}
-    [data-testid="stAlert"]>div,[data-testid="stAlert"] [data-testid="stMarkdownContainer"],[data-testid="stAlert"] p{height:auto!important;min-height:0!important;max-height:none!important;overflow:visible!important;color:#0F172A!important}
-    .status-chip,.status-card,.kpi-card,.empty-state,.hero-shell,.analysis-shell,.st-key-analysis_card,[data-testid="stVerticalBlockBorderWrapper"],[data-testid="stExpander"]{background:#FFFFFF}
-    .kpi-card{box-shadow:0 10px 24px rgba(15,23,42,.05)}
+    :root{--page:#F8FAFC;--sidebar:#FFFFFF;--panel:#FFFFFF;--raised:#F1F5F9;--input:#FFFFFF;--text:#0F172A;--muted:#5B6478;--line:#DCE3EE;
+    --v-verified:#047857;--v-partial:#B45309;--v-stale:#7E22CE;--v-false:#BE123C;--v-unclear:#475569}
+    [data-testid="stAppViewContainer"],[data-testid="stApp"]{color:var(--text);background:var(--page)!important}
+    [data-testid="stSidebar"],[data-testid="stSidebar"]>div:first-child{background:var(--sidebar)!important}
+    [data-testid="stSidebar"] *,[data-testid="stMarkdownContainer"] p,[data-testid="stCaptionContainer"]{color:var(--text)}
+    [data-testid="stHeader"]{background:transparent}
+    .hero-shell,.status-card,.kpi-card,.empty-state,.claim-card,.st-key-analysis_card,[data-testid="stVerticalBlockBorderWrapper"],[data-testid="stExpander"]{background:#FFFFFF!important;box-shadow:0 10px 26px rgba(15,23,42,.05)}
+    .hero-kicker,.step-num{color:#1D4ED8}.step-copy strong,.brand-name{color:var(--text)}
+    .hero-art{color:#4338CA;border-color:#C7D2FE;background:linear-gradient(145deg,#EEF2FF,#F5F3FF)}
+    .brand-mark,.status-icon{color:#4338CA;background:#EEF2FF;border-color:#C7D2FE}
+    .empty-wave{color:#4338CA;background:#EEF2FF;border-color:#C7D2FE}
     .kpi-meta{color:#64748B}
-    .status-chip strong,.step-copy strong{color:var(--text)}
-    .evidence-label,.sidebar-label{color:#334155}
-    [data-testid="stTextArea"] textarea,[data-testid="stSelectbox"] div[data-baseweb="select"]>div,.st-key-analysis_card [data-testid="stTextArea"] textarea{color:var(--text)!important;background:#FFFFFF!important;border-color:var(--line)}
-    .stButton>button{color:var(--text);background:#FFFFFF;border-color:var(--line)}
-    button[kind*="primary"],button[data-testid*="primary"]{color:#FFFFFF!important;background:linear-gradient(100deg,#2563EB,#7C3AED)!important}
-    button[kind*="primary"] *,button[data-testid*="primary"] *{color:#FFFFFF!important}
-    .status-value,.brand-name,.hero-title,.input-title,.section-title,.empty-copy strong{color:var(--text)}
-    .status-card{background:#FFFFFF}.status-icon{color:#2563EB;background:#EFF6FF;border-color:#DBEAFE}
-    .st-key-analysis_card{border-color:#CBD5E1!important;box-shadow:0 14px 36px rgba(15,23,42,.06)}
-    .st-key-analysis_card [data-testid="stFormSubmitButton"] button{color:#FFFFFF;background:linear-gradient(100deg,#2563EB,#7C3AED,#0891B2)}
-    .st-key-navrow_dashboard_active,.st-key-navrow_analytics_active,.st-key-navrow_presets_active{background:linear-gradient(100deg,rgba(37,99,235,.11),rgba(124,58,237,.08));border-color:#DBEAFE}
-    [data-testid="stExpander"]{border-color:var(--line)}
+    .stButton>button,[data-testid="stDownloadButton"]>button{color:var(--text);background:#FFFFFF;border-color:var(--line)}
+    [data-baseweb="select"]>div,[data-baseweb="popover"] ul[role="listbox"],[data-baseweb="popover"] [data-baseweb="menu"]{background:#FFFFFF!important;color:var(--text)!important}
+    [data-baseweb="popover"] li[role="option"]{color:var(--text)!important}
+    [data-baseweb="popover"] li[role="option"]:hover,[data-baseweb="popover"] li[aria-selected="true"]{background:#EEF2FF!important}
+    [data-testid="stSelectbox"] div[data-baseweb="select"] *{color:var(--text)!important}
+    .example-tag{color:#6D28D9;background:#F5F3FF;border-color:#DDD6FE}
+    button[data-testid^="stBaseButton-segmented_control"]{background:#FFFFFF!important;color:var(--text)!important;border-color:var(--line)!important}
+    button[data-testid="stBaseButton-segmented_controlActive"]{background:#F5F3FF!important;color:#6D28D9!important;border-color:#A78BFA!important}
+    button[data-testid^="stBaseButton-segmented_control"] *{color:inherit!important}
+    .offline-banner{background:#FEF2F2}.offline-banner.warn{background:#FFFBEB}
+    [data-testid="stAlert"]{background:#FFFFFF!important}
+    [data-testid="stAlert"] p{color:var(--text)!important}
     </style>
     """, unsafe_allow_html=True)
 
-SAMPLE_TEXT = PRESETS["Outdated Technology Stack"]
+# ---------------------------------------------------------------------------- content
+PRESETS = {
+    "Outdated tech stack": "Python 3.9 is the latest stable release of Python. React 17 is the latest major release of React. Node.js 18 is currently an Active LTS release.",
+    "AI API pricing (historic)": "GPT-4 Turbo is the latest model in the GPT-4 family. GPT-4 Turbo API pricing is $10 per million input tokens and $30 per million output tokens.",
+    "Mixed claims": "Python 3.14 was released in 2025. React 17 is the latest major release of React. Node.js 24 is an Active LTS release.",
+    "Write my own": "",
+}
+PRESET_NOTES = {
+    "Outdated tech stack": "Version and lifecycle claims.",
+    "AI API pricing (historic)": "Old pricing claims — are they still current?",
+    "Mixed claims": "Some current, some not. None are pre-judged.",
+    "Write my own": "Clears the box so you can paste your own text.",
+}
+
+# Verdict → (CSS class, badge text). "Unverified" is shown to visitors as "Unclear".
+VERDICT_STYLE = {
+    "Verified": ("v-verified", "VERIFIED · CURRENT"),
+    "Partially True": ("v-partial", "PARTIALLY TRUE"),
+    "Stale": ("v-stale", "STALE"),
+    "False": ("v-false", "FALSE"),
+    "Unverified": ("v-unclear", "UNCLEAR"),
+}
+FALLBACK_VERDICT = {"Fresh": "Verified", "Stale": "Stale", "Unverified": "Unverified"}
+
+# A real result StaleBot produced on 13 Nov 2026 (gpt-oss-20b via Groq + Tavily), shown on the
+# landing page so visitors see what a check looks like before running one.
+EXAMPLE_CHECKED_ON = "13 Nov 2026"
+EXAMPLE_RESULT = {
+    "claim": "React 17 is the latest major release of React",
+    "status": "Stale", "verdict": "Stale", "freshness_score": 10,
+    "updated_fact": "React 19 is the latest major release of React.",
+    "explanation": ("The sources show React 18 was released in March 2022 and React 19 in December "
+                    "2024, with the latest stable version 19.2.8 as of July 2026. The claim is no "
+                    "longer accurate."),
+    "evidence_analysis": "endoflife.date lists React 19 (released 05 Dec 2024) as the current major "
+                         "line; the React 17 announcement is from 2020.",
+    "recommended_correction": "React 19 is the latest major release of React.",
+    "sources": [
+        {"title": "React | endoflife.date", "url": "https://endoflife.date/react",
+         "published_date": "", "stated_date": "2026-07-21"},
+        {"title": "React v17.0 – React Blog", "url": "https://legacy.reactjs.org/blog/2020/10/20/react-v17.html",
+         "published_date": "", "stated_date": "2020-10-20"},
+        {"title": "Versioning Policy – React", "url": "https://react.dev/community/versioning-policy",
+         "published_date": "", "stated_date": ""},
+    ],
+}
+
+ICONS = {
+    "shield": '<path d="M12 3 19 6v5c0 4.5-2.8 7.6-7 10-4.2-2.4-7-5.5-7-10V6l7-3Z"/><path d="m9 12 2 2 4-4"/>',
+    "bolt": '<path d="m13 2-3 9h7L9 22l3-9H5l8-11Z"/>',
+    "model": '<rect x="4" y="4" width="16" height="16" rx="3"/><path d="M9 9h6v6H9zM9 1v3m6-3v3M9 20v3m6-3v3M1 9h3m-3 6h3m16-6h3m-3 6h3"/>',
+    "search": '<circle cx="11" cy="11" r="7.5"/><path d="m21 21-4.3-4.3"/>',
+    "wand": '<path d="m15 4 5 5M3 21l12-12M6 3l.8 2.2L9 6l-2.2.8L6 9l-.8-2.2L3 6l2.2-.8L6 3Zm12 10 .8 2.2L21 16l-2.2.8L18 19l-.8-2.2L15 16l2.2-.8L18 13Z"/>',
+    "alert": '<circle cx="12" cy="12" r="10"/><path d="M12 7v6M12 17h.01"/>',
+    "plug": '<path d="M9 2v6M15 2v6M6 8h12v4a6 6 0 0 1-12 0V8ZM12 18v4"/>',
+}
 
 
+def icon_svg(name):
+    return f'<svg class="ico" viewBox="0 0 24 24" aria-hidden="true">{ICONS[name]}</svg>'
 
-def render_status_card(label, value, state, icon_name):
-    state_class = "ok" if state == "ok" else "warn" if state == "warn" else "bad"
+
+def esc(value):
+    return html.escape(str(value or ""))
+
+
+def safe_url(url):
+    parsed = urlparse(url or "")
+    return url if parsed.scheme in {"http", "https"} and parsed.hostname else None
+
+
+def render_status_card(label, value, state, icon_name, detail=""):
+    state_class = state if state in {"ok", "warn", "bad"} else "warn"
+    tip = esc(f"{label}: {value}" + (f" — {detail}" if detail else ""))
     st.markdown(
-        f'<div class="status-card"><div class="status-icon">{icon_svg(icon_name)}</div>'
-        f'<div style="min-width:0;flex:1"><div class="status-title">{html.escape(label)}</div>'
-        f'<div class="status-value"><span class="status-led {state_class}"></span>'
-        f'{html.escape(value)}</div></div></div>',
+        f'<div class="status-card" title="{tip}"><div class="status-icon">{icon_svg(icon_name)}</div>'
+        f'<div style="min-width:0;flex:1"><div class="status-title">{esc(label)}</div>'
+        f'<div class="status-value"><span class="status-led {state_class}"></span>{esc(value)}</div>'
+        "</div></div>",
         unsafe_allow_html=True,
     )
-
-
-def render_nav_item(label, key, icon_name):
-    active = st.session_state["active_view"] == label
-    with st.container(key=f"navrow_{key}_{'active' if active else 'idle'}"):
-        columns = st.columns([0.32, 1], gap="small", vertical_alignment="center")
-        with columns[0]:
-            st.markdown(
-                f'<div class="nav-icon {"active" if active else ""}">{icon_svg(icon_name)}</div>',
-                unsafe_allow_html=True,
-            )
-        with columns[1]:
-            st.button(
-                label,
-                key=f"nav_{key}",
-                type="primary" if active else "secondary",
-                on_click=set_active_view,
-                args=(label,),
-                use_container_width=True,
-            )
 
 
 def render_kpi(label, value, note, accent):
     st.markdown(
-        f'<div class="kpi-card" style="border-top:2px solid {accent}">'
-        f'<div class="kpi-label">{html.escape(label)}</div>'
-        f'<div class="kpi-value">{html.escape(str(value))}</div>'
-        f'<div class="kpi-meta">{html.escape(note)}</div></div>',
+        f'<div class="kpi-card" style="border-top:2px solid {accent}"><div class="kpi-label">{esc(label)}</div>'
+        f'<div class="kpi-value">{esc(value)}</div><div class="kpi-meta">{esc(note)}</div></div>',
         unsafe_allow_html=True,
     )
 
 
-def render_sources(sources):
-    with st.expander(f"Live sources · {len(sources)}", expanded=False):
-        if not sources:
-            st.caption("No source evidence was returned for this claim.")
-        for source in sources:
-            url = source.get("url", "")
-            domain = urlparse(url).hostname if url else None
-            columns = st.columns([4, 1])
-            with columns[0]:
-                st.write(f"**{source.get('title') or 'Untitled source'}**")
-                if domain:
-                    date = source.get("published_date")
-                    st.caption(domain + (f" · {date}" if date else ""))
-            with columns[1]:
-                if urlparse(url).scheme in {"http", "https"} and domain:
-                    st.link_button("Open source", url, use_container_width=True)
-            st.write(source.get("content") or "No supporting excerpt was provided by the search result.")
-            st.divider()
+def source_date_text(source):
+    if source.get("published_date"):
+        return f"Published {source['published_date'][:10]}"
+    if source.get("stated_date"):
+        return f"Dated {source['stated_date']} (from the page)"
+    return "No date given by the source"
+
+
+def render_claim(item, index=None, example=False):
+    verdict = item.get("verdict") or FALLBACK_VERDICT.get(item.get("status"), "Unverified")
+    css, badge = VERDICT_STYLE.get(verdict, VERDICT_STYLE["Unverified"])
+    sources = item.get("sources") or []
+    items = []
+    for source in sources:
+        url = safe_url(source.get("url"))
+        title = esc(source.get("title") or (urlparse(url).hostname if url else "Source"))
+        host = esc(urlparse(url).hostname.removeprefix("www.")) if url else ""
+        link = f'<a href="{esc(url)}" target="_blank" rel="noopener noreferrer">{title} ↗</a>' if url else f"<b>{title}</b>"
+        items.append(f'<li>{link}<span class="src-meta">{host}{" · " if host else ""}{esc(source_date_text(source))}</span></li>')
+    sources_html = (f'<ul class="src-list">{"".join(items)}</ul>' if items
+                    else '<div class="src-none">No live sources were returned for this claim.</div>')
+    if verdict in {"Stale", "False"}:
+        now = f'<div class="claim-now"><em>Now:</em> {esc(item.get("updated_fact"))}</div>'
+    elif verdict == "Unverified":
+        now = f'<div class="claim-now"><em>Why unclear:</em> {esc(item.get("explanation"))}</div>'
+    else:
+        now = f'<div class="claim-now"><em>Confirmed:</em> {esc(item.get("updated_fact"))}</div>'
+    label = "EXAMPLE" if example else (f"CLAIM {index:02d}" if index else "")
+    st.markdown(
+        f'<div class="claim-card {css}"><div class="claim-head">'
+        + (f'<span class="example-tag">{label}</span>' if example else f'<span class="status-title">{label}</span>')
+        + f'<span class="vbadge">{badge}</span>'
+        f'<span class="claim-score"><b>{int(item.get("freshness_score", 0))}</b>/100 freshness</span></div>'
+        f'<div class="claim-text">{esc(item.get("claim"))}</div>{now}{sources_html}</div>',
+        unsafe_allow_html=True,
+    )
+    with st.expander("Full assessment", expanded=False):
+        st.markdown(f"**Assessment.** {item.get('explanation', '')}")
+        st.markdown(f"**Evidence.** {item.get('evidence_analysis', '')}")
+        st.markdown(f"**Suggested correction.** {item.get('recommended_correction', '')}")
 
 
 def render_downloads(analysis):
-    st.markdown('<div class="section-heading"><h2>Export audit</h2></div>', unsafe_allow_html=True)
     full_report, corrected_summary = build_reports(analysis)
     downloads = st.columns(2)
     with downloads[0]:
-        st.download_button(
-            "Download full audit report", full_report, "stale-answer-audit.md",
-            "text/markdown", use_container_width=True,
-        )
+        st.download_button("Download full audit (.md)", full_report, "stalebot-audit.md",
+                           "text/markdown", use_container_width=True)
     with downloads[1]:
-        st.download_button(
-            "Download corrected summary", corrected_summary, "corrected-summary.md",
-            "text/markdown", use_container_width=True,
-        )
+        st.download_button("Download corrected summary (.md)", corrected_summary,
+                           "stalebot-corrected-summary.md", "text/markdown", use_container_width=True)
 
 
 def render_analysis(analysis):
     results = analysis["results"]
     if analysis.get("claims_truncated"):
-        st.info(
-            f"{analysis['claims_truncated']} more claim(s) were found but not checked: each check is "
-            f"limited to {len(results)} claims. Split long texts into smaller parts."
-        )
+        st.info(f"{analysis['claims_truncated']} more claim(s) were found but not checked: each check is "
+                f"limited to {len(results)} claims. Split long texts into smaller parts.")
     if not results:
         st.markdown(
-            '<div class="empty-state"><div class="empty-mark">i</div>'
-            "<strong>No verifiable claims found</strong><br>"
-            "Bifrost did not identify a factual claim to check in this text.</div>",
+            f'<div class="empty-state"><div class="empty-wave">{icon_svg("search")}</div><div class="empty-copy">'
+            "<strong>No checkable claims found</strong>StaleBot looks for facts that can go out of date — "
+            "versions, prices, release dates, rules. Try text that states one.</div></div>",
             unsafe_allow_html=True,
         )
-        render_downloads(analysis)
         return
 
     counts, score, trust = summarize(results)
-    st.markdown('<div class="section-heading"><h2>Audit overview</h2></div>', unsafe_allow_html=True)
+    verdicts = [r.get("verdict") or FALLBACK_VERDICT.get(r["status"], "Unverified") for r in results]
+    stale = sum(v in {"Stale", "False"} for v in verdicts)
+    st.markdown('<div class="section-heading"><h2>Results</h2></div>', unsafe_allow_html=True)
     cards = st.columns(4, gap="small")
     values = [
         ("Overall freshness", f"{score}/100", trust, "#3B82F6"),
-        ("Claims audited", len(results), "Extracted and analyzed", "#8B5CF6"),
-        ("Stale claims", counts["Stale"], "Contradicted by newer evidence", "#FB7185"),
-        ("Verified fresh", counts["Fresh"], "Supported by current evidence", "#34D399"),
+        ("Claims checked", len(results), f"via {analysis.get('provider_label') or 'AI model'}", "#8B5CF6"),
+        ("Stale or false", stale, "Contradicted by newer evidence", "#C084FC"),
+        ("Unclear", counts["Unverified"], "Not enough evidence either way", "#94A3B8"),
     ]
     for column, args in zip(cards, values):
         with column:
             render_kpi(*args)
-    st.markdown('<div class="section-heading"><h2>Reliability</h2></div>', unsafe_allow_html=True)
-    st.progress(score, text=f"{trust} · {score} / 100")
-    st.caption(
-        "Rounded mean of claim scores. Unverified claims receive a neutral 41-69 score and "
-        "are tracked separately; missing evidence is not treated as stale."
-    )
-    st.markdown('<div class="section-heading"><h2>Executive summary</h2></div>', unsafe_allow_html=True)
-    with st.container(border=True):
-        st.write(
-            f"This audit reviewed **{len(results)} claims**: **{counts['Fresh']} fresh**, "
-            f"**{counts['Stale']} stale**, and **{counts['Unverified']} unverified**. "
-            "Unverified means evidence was insufficient or conflicting; it does not mean the claim is false."
-        )
-        if analysis["search_failures"]:
-            st.warning(f"{analysis['search_failures']} live search request(s) failed. Those claims remain unverified, not stale.")
-
-    st.markdown('<div class="section-heading"><h2>Claim findings</h2></div>', unsafe_allow_html=True)
+    if analysis["search_failures"]:
+        st.warning(f"{analysis['search_failures']} live search(es) failed. Those claims are marked unclear, not stale.")
     for index, item in enumerate(results, start=1):
-        with st.container(border=True):
-            top = st.columns([4, 1])
-            with top[0]:
-                st.caption(f"CLAIM {index:02d}")
-                st.markdown(f"**{item['claim']}**")
-            with top[1]:
-                status_class = item["status"].lower()
-                st.markdown(
-                    f'<div style="text-align:right"><span class="status-badge status-{status_class}">'
-                    f'{html.escape(item["status"].upper())}</span><br>'
-                    f'<span style="color:#F8FAFC;font-size:1.25rem;font-weight:700">{item["freshness_score"]}'
-                    '<span style="color:#94A3B8;font-size:.75rem"> / 100</span></span></div>',
-                    unsafe_allow_html=True,
-                )
-            st.markdown('<div class="evidence-label">Current information</div>', unsafe_allow_html=True)
-            st.write(item["updated_fact"])
-            columns = st.columns(2)
-            with columns[0]:
-                st.markdown('<div class="evidence-label">Assessment</div>', unsafe_allow_html=True)
-                st.write(item["explanation"])
-            with columns[1]:
-                st.markdown('<div class="evidence-label">Evidence analysis</div>', unsafe_allow_html=True)
-                st.write(item["evidence_analysis"])
-            st.markdown('<div class="evidence-label">Recommended correction</div>', unsafe_allow_html=True)
-            st.write(item["recommended_correction"])
-            render_sources(item["sources"])
-
+        render_claim(item, index=index)
+    st.markdown('<div class="section-heading"><h2>Export</h2></div>', unsafe_allow_html=True)
     render_downloads(analysis)
 
 
+# ---------------------------------------------------------------------------- access
 security_cfg = SecurityConfig.from_env()
 
 
@@ -310,13 +389,12 @@ def visitor_key():
     return "session:" + st.session_state["visitor_id"]
 
 
-# Private deployments (ACCESS_TOKEN set) ask for a key before showing anything.
 if "access_role" not in st.session_state:
     st.session_state["access_role"] = role_for_token(security_cfg, "")
 if st.session_state["access_role"] is None:
-    st.markdown('<div class="hero-shell"><div class="hero-kicker">PRIVATE WORKSPACE</div>'
+    st.markdown('<div class="hero-shell"><div class="hero-text"><div class="hero-kicker">Private workspace</div>'
                 '<div class="hero-title">Stale<span>Bot</span></div>'
-                '<div class="hero-copy">Enter the access key you were given to continue.</div></div>',
+                '<div class="hero-copy">Enter the access key you were given to continue.</div></div></div>',
                 unsafe_allow_html=True)
     with st.form("access_form"):
         supplied = st.text_input("Access key", type="password")
@@ -333,215 +411,224 @@ if st.session_state["access_role"] is None:
             st.error("That key was not accepted.")
     st.stop()
 
-st.session_state.setdefault("answer_text", SAMPLE_TEXT)
-st.session_state.setdefault("selected_preset", "Outdated Technology Stack")
-st.session_state.setdefault("analysis", None)
-st.session_state.setdefault("active_view", "Dashboard")
+# ---------------------------------------------------------------------------- service status
 settings = get_settings()
-# The gateway check is a (small) paid model call, so it runs only on request, not on page load.
-st.session_state.setdefault("bifrost_probe", {"state": "unchecked", "model_available": None})
+st.session_state.setdefault("answer_text", PRESETS["Outdated tech stack"])
+st.session_state.setdefault("analysis", None)
 
+
+@st.cache_data(ttl=60, show_spinner=False)
+def shared_service_check(route_signature):
+    """One tiny model call per minute at most, shared by every visitor (args are only a cache key)."""
+    return check_service(get_settings())
+
+
+def route_signature():
+    return tuple((r["name"], r["base_url"], r["model"]) for r in llm_routes(settings))
+
+
+if "service" not in st.session_state:
+    st.session_state["service"] = shared_service_check(route_signature())
+
+
+def recheck_service():
+    wait = limiter.hit([(f"st-probe:{visitor_key()}", 1, max(1, security_cfg.probe_cooldown_s))])
+    if wait and st.session_state["access_role"] != ROLE_ADMIN:
+        st.toast(f"Checked a moment ago. Try again in {wait}s.")
+        return
+    shared_service_check.clear()
+    with st.spinner("Checking the analysis service…"):
+        st.session_state["service"] = shared_service_check(route_signature())
+    st.session_state.pop("analysis_error", None)
+
+
+service = st.session_state["service"]
+service_state = service.get("state")
+SERVICE_DOWN = service_state in {"unavailable", "missing"} or (
+    service_state == "connected" and service.get("model_available") is False)
+
+# ---------------------------------------------------------------------------- sidebar
 with st.sidebar:
     st.markdown(
-        '<div class="brand-lockup"><div class="brand-mark">'
-        f'{icon_svg("shield")}</div><div><div class="brand-name">StaleBot</div>'
-        '<div class="brand-tagline">Detect. Verify. Trust.</div></div></div>',
+        f'<div class="brand-lockup"><div class="brand-mark">{icon_svg("shield")}</div><div>'
+        '<div class="brand-name">StaleBot</div><div class="brand-tagline">Detect. Verify. Trust.</div></div></div>',
         unsafe_allow_html=True,
     )
-    st.markdown('<div class="sidebar-label">Workspace</div>', unsafe_allow_html=True)
-    render_nav_item("Dashboard", "dashboard", "dashboard")
-    render_nav_item("Analytics", "analytics", "analytics")
-    render_nav_item("Quick Presets", "presets", "presets")
-    st.divider()
     st.markdown('<div class="sidebar-label">Theme</div>', unsafe_allow_html=True)
-    theme_buttons = st.columns(2, gap="small")
-    with theme_buttons[0]:
-        st.button(
-            "Dark",
-            key="theme_dark_button",
-            type="primary" if st.session_state["theme"] == "Dark" else "secondary",
-            on_click=set_theme,
-            args=("Dark",),
-            use_container_width=True,
-        )
-    with theme_buttons[1]:
-        st.button(
-            "Light",
-            key="theme_light_button",
-            type="primary" if st.session_state["theme"] == "Light" else "secondary",
-            on_click=set_theme,
-            args=("Light",),
-            use_container_width=True,
-        )
-    st.markdown('<div class="sidebar-label">Quick presets</div>', unsafe_allow_html=True)
-    selected = st.selectbox(
-        "Choose a starting point", list(PRESETS), key="selected_preset", label_visibility="collapsed"
-    )
+    chosen = st.segmented_control("Theme", ["Dark", "Light"], default=st.session_state["theme"],
+                                  key="theme_picker", label_visibility="collapsed")
+    if chosen and chosen != st.session_state["theme"]:
+        st.session_state["theme"] = chosen
+        st.rerun()
+
+    st.markdown('<div class="sidebar-label">Try an example</div>', unsafe_allow_html=True)
+    selected = st.selectbox("Example text", list(PRESETS), key="selected_preset", label_visibility="collapsed")
     st.caption(PRESET_NOTES[selected])
-    if st.button("Load selected preset", type="primary", use_container_width=True):
+    if st.button("Use this example", use_container_width=True):
         st.session_state["answer_text"] = PRESETS[selected]
         st.session_state["analysis"] = None
         st.session_state.pop("analysis_error", None)
-    st.divider()
-    st.markdown('<div class="sidebar-label">Gateway</div>', unsafe_allow_html=True)
-    if st.button("Check gateway connection", use_container_width=True):
-        wait = limiter.hit([(f"st-probe:{visitor_key()}", 1, max(1, security_cfg.probe_cooldown_s))])
-        if wait and st.session_state["access_role"] != ROLE_ADMIN:
-            st.toast(f"Checked recently. Try again in {wait}s.")
-        else:
-            with st.spinner("Checking gateway…"):
-                st.session_state["bifrost_probe"] = check_bifrost(settings)
-            st.rerun()
-    st.divider()
+        st.rerun()
+
     st.markdown('<div class="sidebar-label">How it works</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="step-row"><span class="step-num">01</span><div class="step-copy"><strong>Claim detection</strong>Extract independently verifiable facts.</div></div>'
-        '<div class="step-row"><span class="step-num">02</span><div class="step-copy"><strong>Live web verification</strong>Verify claims against current web sources.</div></div>'
-        '<div class="step-row"><span class="step-num">03</span><div class="step-copy"><strong>Freshness scoring</strong>Evaluate evidence, recency, and confidence.</div></div>',
+        '<div class="step-row"><span class="step-num">1</span><div class="step-copy"><strong>Extract</strong>Find facts that can go out of date.</div></div>'
+        '<div class="step-row"><span class="step-num">2</span><div class="step-copy"><strong>Search</strong>Look each one up on the live web.</div></div>'
+        '<div class="step-row"><span class="step-num">3</span><div class="step-copy"><strong>Score</strong>Compare with current evidence and rate freshness.</div></div>',
         unsafe_allow_html=True,
     )
+    st.markdown('<div class="sidebar-label">Service</div>', unsafe_allow_html=True)
+    if st.button("Re-check connection", use_container_width=True, key="sidebar_recheck"):
+        recheck_service()
+        st.rerun()
 
-hero_columns = st.columns([5, 1.15], vertical_alignment="center")
-with hero_columns[0]:
-    st.markdown(
-        '<div class="hero-shell"><div class="hero-kicker">REAL-TIME CLAIM INTELLIGENCE</div>'
-        '<div class="hero-title">Stale<span>Bot</span></div>'
-        '<div class="hero-copy">An intelligent verification platform that detects outdated AI claims using real-time web intelligence.</div></div>',
-        unsafe_allow_html=True,
-    )
-with hero_columns[1]:
-    st.markdown(f'<div class="hero-art">{icon_svg("shield")}</div>', unsafe_allow_html=True)
+# ---------------------------------------------------------------------------- main
+st.markdown(
+    '<div class="hero-shell"><div class="hero-text"><div class="hero-kicker">Real-time claim checking</div>'
+    '<div class="hero-title">Stale<span>Bot</span></div>'
+    '<div class="hero-copy">Paste an AI answer, headline or claim. StaleBot finds the facts that can '
+    'go out of date, checks each one against live web sources, and tells you which are still true.</div></div>'
+    f'<div class="hero-art">{icon_svg("shield")}</div></div>',
+    unsafe_allow_html=True,
+)
 
 status_columns = st.columns(3, gap="small")
-probe = st.session_state["bifrost_probe"]
-gateway_value = {
-    "connected": "Connected", "unavailable": "Unavailable", "missing": "Not configured",
-}.get(probe["state"], "Not checked yet")
-gateway_state = {"connected": "ok", "unavailable": "bad"}.get(probe["state"], "warn")
+provider = service.get("provider")
+service_value, service_level, service_detail = {
+    "connected": ("Online" + (" · Groq direct" if provider == "groq" else ""), "ok",
+                  "Gateway offline; using the direct Groq fallback" if provider == "groq" else "AI model is responding"),
+    "unavailable": ("Offline", "bad", "The AI model can't be reached right now"),
+    "missing": ("Not set up", "warn", "Model keys are missing"),
+}.get(service_state, ("Checking…", "warn", ""))
+if service_state == "connected" and service.get("model_available") is False:
+    service_value, service_level, service_detail = "Model unavailable", "bad", "The model rejected the request"
 with status_columns[0]:
-    render_status_card("Bifrost Gateway", gateway_value, gateway_state, "bolt")
-if probe["model_available"] is True:
-    model_value, model_state = settings["model"], "ok"
-elif probe["model_available"] is False:
-    model_value, model_state = "Unavailable · " + settings["model"], "bad"
-else:
-    model_value, model_state = settings["model"] or "Not configured", "warn"
+    render_status_card("AI service", service_value, service_level, "bolt", service_detail)
+model_id = service.get("model") or settings["model"]
 with status_columns[1]:
-    render_status_card("Current AI Model", model_value, model_state, "model")
-tavily_state = st.session_state.get(
-    "tavily_state", "configured" if settings["tavily_api_key"] else "missing"
-)
-tavily_value = {
-    "active": "Live search active",
-    "failed": "Search unavailable",
-    "configured": "Configured · not yet tested",
-    "missing": "Not configured",
-}[tavily_state]
+    render_status_card("AI model", model_id.split("/")[-1], "ok" if service_state == "connected" else "warn",
+                       "model", model_id)
+tavily_state = st.session_state.get("tavily_state", "configured" if settings["tavily_api_key"] else "missing")
+tavily_value = {"active": "Active", "failed": "Failing", "configured": "Ready",
+                "missing": "Not set up"}[tavily_state]
 with status_columns[2]:
-    render_status_card(
-        "Tavily live search", tavily_value,
-        "ok" if tavily_state == "active" else "bad" if tavily_state in {"failed", "missing"} else "warn",
-        "search",
-    )
+    render_status_card("Live web search (Tavily)", tavily_value,
+                       {"active": "ok", "configured": "ok", "failed": "bad"}.get(tavily_state, "warn"), "search",
+                       "Each claim is searched on the live web")
 
-analysis = st.session_state.get("analysis")
-submitted = False
-
-if st.session_state["active_view"] == "Analytics":
-    st.markdown('<div class="section-title">Audit analytics</div>', unsafe_allow_html=True)
-    if analysis and analysis["results"]:
-        counts, score, trust = summarize(analysis["results"])
-        st.caption(f"Latest audit · {analysis['created_at']} · {trust} at {score}/100")
-        st.bar_chart(
-            {"Fresh": [counts["Fresh"]], "Stale": [counts["Stale"]], "Unverified": [counts["Unverified"]]},
-            horizontal=True,
-        )
-        render_analysis(analysis)
-    else:
-        st.markdown(
-            '<div class="empty-state"><div class="empty-wave">'
-            f'{icon_svg("analytics")}</div><div class="empty-copy">'
-            '<strong>No audit metrics yet</strong>Run a live analysis to see claim counts and freshness distribution. No historical metrics are fabricated.</div></div>',
-            unsafe_allow_html=True,
-        )
-else:
-    if st.session_state["active_view"] == "Quick Presets":
-        st.markdown(
-            '<div class="section-title">Quick Presets</div>'
-            f'<div class="empty-copy">{html.escape(selected)} — {html.escape(PRESET_NOTES[selected])}</div>',
-            unsafe_allow_html=True,
-        )
-
-    with st.container(key="analysis_card", border=True):
-        heading_columns = st.columns([1.5, 1], vertical_alignment="center")
-        with heading_columns[0]:
-            st.markdown(
-                f'<div class="input-title">{icon_svg("wand")}Analyze an Answer</div>'
-                '<div class="input-hint">Paste / Type your claim or fact.</div>',
-                unsafe_allow_html=True,
-            )
-        with heading_columns[1]:
-            st.markdown('<div class="live-flag"><span></span>LIVE SOURCES — NO MOCK DATA</div>', unsafe_allow_html=True)
-        with st.form("audit_form", clear_on_submit=False):
-            st.text_area(
-                "Paste / Type your claim or fact", key="answer_text", height=170, max_chars=8000,
-                placeholder="Example: Node.js 18 is the current Active LTS release…",
-                label_visibility="collapsed",
-            )
-            submitted = st.form_submit_button(
-                "Analyze Claim", type="primary", use_container_width=True,
-                icon=":material/search:",
-            )
-
-    if submitted:
-        st.session_state["analysis"] = None
-        st.session_state.pop("analysis_error", None)
-        if probe["state"] == "connected" and probe["model_available"] is False:
-            st.session_state["analysis_error"] = (
-                "The configured model is not listed by Bifrost for this gateway. "
-                "Check MODEL_NAME and model permissions."
-            )
-        elif not st.session_state["answer_text"].strip():
-            st.session_state["analysis_error"] = "Enter text or load a preset before running an audit."
+if SERVICE_DOWN:
+    st.write("")
+    banner_cols = st.columns([5, 1.2], vertical_alignment="center")
+    with banner_cols[0]:
+        if service_state == "missing":
+            st.markdown(f'<div class="offline-banner warn">{icon_svg("plug")}<div><strong>StaleBot isn\'t set up yet</strong>'
+                        "<span>The site owner still needs to add the service keys. Analysis is paused until then.</span></div></div>",
+                        unsafe_allow_html=True)
         else:
-            wait = 0
-            if st.session_state["access_role"] != ROLE_ADMIN:
-                who = visitor_key()
-                wait = limiter.hit([
-                    (f"st-analyze-min:{who}", security_cfg.analyze_limit_per_minute, 60),
-                    (f"st-analyze-hour:{who}", security_cfg.analyze_limit_per_hour, 3600),
-                ])
-            gate = concurrency_gate("streamlit-analyses", security_cfg.max_concurrent_analyses)
-            if wait:
-                result, error = None, f"Analysis limit reached. Try again in {wait}s."
-            elif not gate.acquire(blocking=False):
-                result, error = None, "StaleBot is busy with other analyses. Please try again shortly."
-            else:
-                try:
-                    with st.spinner("Extracting claims and checking live sources…"):
-                        result, error = analyze_text(st.session_state["answer_text"], settings)
-                finally:
-                    gate.release()
-            if error:
-                st.session_state["analysis_error"] = error
-            else:
-                st.session_state["analysis"] = result
-                if result["search_successes"]:
-                    st.session_state["tavily_state"] = "active" if not result["search_failures"] else "failed"
-                elif result["results"]:
-                    st.session_state["tavily_state"] = "failed"
-                st.session_state["bifrost_probe"] = {"state": "connected", "model_available": True}
-                st.rerun()
+            st.markdown(f'<div class="offline-banner">{icon_svg("alert")}<div><strong>The analysis service is offline right now</strong>'
+                        "<span>Analyzing is paused until it's back. This is usually temporary — try again in a minute.</span></div></div>",
+                        unsafe_allow_html=True)
+    with banner_cols[1]:
+        if service_state != "missing" and st.button("Retry", type="primary", use_container_width=True, key="banner_retry"):
+            recheck_service()
+            st.rerun()
 
-    if st.session_state.get("analysis_error"):
-        st.error(st.session_state["analysis_error"])
-    elif st.session_state.get("analysis") is not None:
-        render_analysis(st.session_state["analysis"])
-    else:
-        st.markdown(
-            '<div class="empty-state"><div class="empty-wave">'
-            f'{icon_svg("search")}</div><div class="empty-copy">'
-            '<strong>Your audit workspace is ready.</strong>'
-            'Paste a claim above and click Analyze Claim to get real-time verification results.</div></div>',
-            unsafe_allow_html=True,
+st.write("")
+submitted = False
+with st.container(key="analysis_card", border=True):
+    heading_columns = st.columns([1.5, 1], vertical_alignment="center")
+    with heading_columns[0]:
+        st.markdown(f'<div class="input-title">{icon_svg("wand")}Check a claim or AI answer</div>'
+                    '<div class="input-hint">Paste text below — StaleBot checks every time-sensitive fact in it.</div>',
+                    unsafe_allow_html=True)
+    with heading_columns[1]:
+        st.markdown('<div class="live-flag"><span></span>LIVE SOURCES — NO MOCK DATA</div>', unsafe_allow_html=True)
+    with st.form("audit_form", clear_on_submit=False, border=False):
+        st.text_area("Text to check", key="answer_text", height=150, max_chars=8000,
+                     placeholder="Example: Node.js 18 is the current Active LTS release…",
+                     label_visibility="collapsed")
+        submitted = st.form_submit_button(
+            "Service offline — analysis paused" if SERVICE_DOWN else "Analyze claim",
+            type="primary", use_container_width=True, disabled=SERVICE_DOWN,
         )
+
+if submitted and not SERVICE_DOWN:
+    st.session_state["analysis"] = None
+    st.session_state.pop("analysis_error", None)
+    text = st.session_state["answer_text"].strip()
+    if not text:
+        st.session_state["analysis_error"] = "Type or paste some text first, or pick an example in the sidebar."
+    else:
+        wait = 0
+        if st.session_state["access_role"] != ROLE_ADMIN:
+            who = visitor_key()
+            wait = limiter.hit([
+                (f"st-analyze-min:{who}", security_cfg.analyze_limit_per_minute, 60),
+                (f"st-analyze-hour:{who}", security_cfg.analyze_limit_per_hour, 3600),
+            ])
+        gate = concurrency_gate("streamlit-analyses", security_cfg.max_concurrent_analyses)
+        result, error = None, None
+        if wait:
+            error = f"You've reached the analysis limit. Try again in {wait}s."
+        elif not gate.acquire(blocking=False):
+            error = "StaleBot is busy with other checks. Please try again in a few seconds."
+        else:
+            try:
+                with st.status("Step 1 of 3 · Extracting claims…", expanded=True) as progress_box:
+                    def on_progress(stage, index=None, total=None, claim=None):
+                        if stage == "extract":
+                            st.write("🔍 **Extracting** the facts that can go out of date…")
+                        elif stage == "search":
+                            progress_box.update(label=f"Step 2 of 3 · Searching live sources ({index}/{total})…")
+                            st.write(f"🌐 **Searching** the web: _{claim}_")
+                        elif stage == "score":
+                            progress_box.update(label=f"Step 3 of 3 · Scoring freshness ({index}/{total})…")
+                            st.write(f"⚖️ **Scoring** against current evidence ({index}/{total})")
+                    result, error = analyze_text(text, settings, progress=on_progress)
+                    progress_box.update(label="Check complete" if not error else "Check failed",
+                                        state="complete" if not error else "error", expanded=False)
+            finally:
+                gate.release()
+        if error:
+            st.session_state["analysis_error"] = error
+            if error == ERR_OFFLINE:
+                shared_service_check.clear()
+                st.session_state["service"] = {"state": "unavailable", "model_available": None, "provider": None}
+            elif error == ERR_NOT_CONFIGURED:
+                st.session_state["service"] = {"state": "missing", "model_available": None, "provider": None}
+            st.rerun()
+        else:
+            st.session_state["analysis"] = result
+            if result["search_successes"]:
+                st.session_state["tavily_state"] = "active" if not result["search_failures"] else "failed"
+            elif result["results"]:
+                st.session_state["tavily_state"] = "failed"
+            st.session_state["service"] = {"state": "connected", "model_available": True,
+                                           "provider": result.get("provider"), "model": result.get("model_used")}
+            st.rerun()
+
+if st.session_state.get("analysis_error"):
+    st.error(st.session_state["analysis_error"])
+if st.session_state.get("analysis") is not None:
+    render_analysis(st.session_state["analysis"])
+else:
+    st.markdown('<div class="section-heading"><h2>What a result looks like</h2></div>', unsafe_allow_html=True)
+    st.caption(f"A real check StaleBot ran on {EXAMPLE_CHECKED_ON}. Your own results appear here after you click Analyze.")
+    render_claim(EXAMPLE_RESULT, example=True)
+
+# ---------------------------------------------------------------------------- footer
+author = os.getenv("STALEBOT_AUTHOR", "").strip()
+repo = safe_url(os.getenv("STALEBOT_GITHUB_URL", "").strip())
+credits = []
+if author:
+    credits.append(f"Built by <strong>{esc(author)}</strong>")
+if repo:
+    credits.append(f'<a href="{esc(repo)}" target="_blank" rel="noopener noreferrer">Source on GitHub ↗</a>')
+st.markdown(
+    '<div class="footer"><strong>About StaleBot.</strong> Checks AI answers and claims for outdated '
+    "information using live web sources. Results are AI-assessed: always open the sources before relying on them."
+    + (f"<br>{' · '.join(credits)}" if credits else "")
+    + '<br><span class="stack-chip">Groq · LLM</span><span class="stack-chip">Tavily · live search</span>'
+    '<span class="stack-chip">Bifrost · AI gateway</span><span class="stack-chip">Streamlit · UI</span></div>',
+    unsafe_allow_html=True,
+)

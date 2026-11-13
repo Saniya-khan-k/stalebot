@@ -20,7 +20,9 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from detector import analyze_text, build_reports, check_bifrost, get_settings
+from detector import (
+    ERR_NOT_CONFIGURED, ERR_OFFLINE, analyze_text, build_reports, check_bifrost, get_settings,
+)
 from security import (
     ROLE_ADMIN, SecurityConfig, bearer_token, build_csp, client_ip, limiter, role_for_token,
     security_headers,
@@ -266,6 +268,9 @@ def status_payload(role=ROLE_ADMIN):
             # The internal gateway address is only shown to admins.
             "base_url": settings["base_url"] if role == ROLE_ADMIN else None,
             "checked_at": runtime["probe_at"],
+            # Which route answered last: "bifrost", or "groq" when running on the direct fallback.
+            "provider": (probe or {}).get("provider"),
+            "fallback_available": bool(settings.get("groq_api_key")),
         },
         "model": {
             "selected": settings["model"],
@@ -544,12 +549,14 @@ def analyze(body: AnalyzeIn, request: Request, role: str = Depends(require_acces
         analysis_slots.release()
     if error:
         log.warning("Analysis failed: %s", error)
-        if "reach Bifrost" in error:
-            runtime["probe"] = {"state": "unavailable", "model_available": None}
+        if error == ERR_OFFLINE:
+            runtime["probe"] = {"state": "unavailable", "model_available": None, "provider": None}
             runtime["probe_at"] = iso(utcnow())
-        raise HTTPException(502 if "Bifrost" in error else 400, error)
+        status = 503 if error in {ERR_OFFLINE, ERR_NOT_CONFIGURED} else 502
+        raise HTTPException(status, error, headers={"Retry-After": "30"} if status == 503 else None)
 
-    runtime["probe"] = {"state": "connected", "model_available": True}
+    runtime["probe"] = {"state": "connected", "model_available": True,
+                        "provider": result.get("provider"), "provider_label": result.get("provider_label")}
     runtime["probe_at"] = iso(utcnow())
     runtime["model_health"][settings["model"]] = "ok"
     if result["search_successes"] or result["search_failures"]:
@@ -559,7 +566,8 @@ def analyze(body: AnalyzeIn, request: Request, role: str = Depends(require_acces
         "id": uuid.uuid4().hex[:12],
         "created_at": iso(utcnow()),
         "input_text": text,
-        "model": settings["model"],
+        "model": result.get("model_used") or settings["model"],
+        "provider": result.get("provider"),
         "duration_ms": duration_ms,
         "search_successes": result["search_successes"],
         "search_failures": result["search_failures"],
@@ -763,6 +771,7 @@ def config(role: str = Depends(require_access)):
         "default_model": get_settings()["model"],
         "selected_model": settings["model"],
         "gateway_key_configured": bool(settings["virtual_key"]),
+        "groq_fallback_configured": bool(settings["groq_api_key"]),
         "tavily_key_configured": bool(settings["tavily_api_key"]),
         "max_input_chars": MAX_INPUT_CHARS,
         "max_claims": settings["max_claims"],

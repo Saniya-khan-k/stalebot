@@ -15,8 +15,10 @@ Missing evidence never counts as "stale": weak or conflicting evidence is report
 | Detection pipeline (shared) | `detector.py` | — |
 | Access control, rate limits, headers (shared) | `security.py` | — |
 
-It uses an OpenAI-compatible **[Bifrost](https://github.com/maximhq/bifrost) gateway** for the
-model and **[Tavily](https://tavily.com)** for live web search. You need both.
+It uses **[Tavily](https://tavily.com)** for live web search, plus a model reached through an
+OpenAI-compatible **[Bifrost](https://github.com/maximhq/bifrost) gateway**, **[Groq](https://console.groq.com)**
+directly, or both. When both are set, Bifrost is tried first and Groq takes over automatically
+if the gateway is unreachable.
 
 ---
 
@@ -109,6 +111,25 @@ docker run -d --name stalebot --env-file .env -e APP_ENV=production \
 
 The image runs as a non-root user, keeps history on the `/data` volume, and has a built-in
 health check (`GET /healthz`).
+
+### Streamlit Community Cloud (the Streamlit UI)
+
+1. Point the app at `app.py`, and pick Python 3.14 under **Advanced settings**.
+2. In **Settings → Secrets**, add the keys in TOML form:
+   ```toml
+   TAVILY_API_KEY = "tvly-..."
+   GROQ_API_KEY = "gsk_..."          # works on its own, no gateway needed
+   # Optional: a *publicly reachable* Bifrost gateway (tried first, Groq is the fallback)
+   # BIFROST_BASE_URL = "https://bifrost.example.com/v1"
+   # BIFROST_VIRTUAL_KEY = "..."
+   # MODEL_NAME = "groq/openai/gpt-oss-20b"
+   APP_ENV = "production"
+   # STALEBOT_AUTHOR = "Your Name"
+   # STALEBOT_GITHUB_URL = "https://github.com/you/stalebot"
+   ```
+3. A `localhost` or private-network `BIFROST_BASE_URL` can't be reached from the cloud. StaleBot
+   detects that within about 5 seconds and uses `GROQ_API_KEY` directly. Without a Groq key, the app shows
+   "service offline" and pauses analysis rather than failing.
 
 ### Platforms (Render, Railway, Fly.io, Heroku-style)
 

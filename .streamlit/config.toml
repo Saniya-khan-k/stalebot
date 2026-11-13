@@ -1,4 +1,15 @@
 # StaleBot Streamlit settings.
+
+[theme]
+# A dark native theme means every widget (inputs, text areas, dropdown menus) is dark from the
+# very first paint. Custom CSS in app.py only refines it, and switches to light on request.
+base = "dark"
+primaryColor = "#7C3AED"
+backgroundColor = "#070B18"
+secondaryBackgroundColor = "#10172B"
+textColor = "#F8FAFC"
+font = "sans serif"
+
 [browser]
 # Don't send usage statistics to Streamlit.
 gatherUsageStats = false
@@ -10,6 +21,5 @@ toolbarMode = "minimal"
 # showErrorDetails = "none"
 
 [server]
-# Same 8,000-character cap as the dashboard API, with headroom for the form payload (MB).
 maxUploadSize = 1
 enableXsrfProtection = true
