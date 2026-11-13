@@ -1,0 +1,7 @@
+# Optional Streamlit UI (app.py). Kept separate because Streamlit pulls in pandas/pyarrow.
+-r requirements.txt
+streamlit==1.57.0
+# Streamlit's heavy dependencies, pinned to the tested versions.
+pandas==2.3.3
+pyarrow==24.0.0
+numpy==2.3.5
