@@ -506,8 +506,9 @@ with status_columns[0]:
     render_status_card("AI service", service_value, service_level, "bolt", service_detail)
 model_id = service.get("model") or settings["model"]
 with status_columns[1]:
-    render_status_card("AI model", model_id.split("/")[-1], "ok" if service_state == "connected" else "warn",
-                       "model", model_id)
+    model_level = ("bad" if service.get("model_available") is False
+                   else "ok" if service_state == "connected" else "warn")
+    render_status_card("AI model", model_id.split("/")[-1], model_level, "model", model_id)
 tavily_state = st.session_state.get("tavily_state", "configured" if settings["tavily_api_key"] else "missing")
 tavily_value = {"active": "Active", "failed": "Failing", "configured": "Ready",
                 "missing": "Not set up"}[tavily_state]
@@ -523,6 +524,16 @@ if SERVICE_DOWN:
         if service_state == "missing":
             st.markdown(f'<div class="offline-banner warn">{icon_svg("plug")}<div><strong>StaleBot isn\'t set up yet</strong>'
                         "<span>The site owner still needs to add the service keys. Analysis is paused until then.</span></div></div>",
+                        unsafe_allow_html=True)
+        elif service.get("model_available") is False:
+            # The model endpoint answered but refused: a key or model-name problem, not an outage.
+            fix = {"key": "Check GROQ_API_KEY (or BIFROST_VIRTUAL_KEY) in the app's secrets.",
+                   "model": "Set GROQ_MODEL (or MODEL_NAME) to a model the provider currently lists."}.get(
+                service.get("reason"), "Check the app's model settings and logs.")
+            st.markdown(f'<div class="offline-banner warn">{icon_svg("plug")}<div><strong>The AI model refused the request</strong>'
+                        f'<span>{esc(service.get("reason_detail") or "The model endpoint refused the request.")} '
+                        f'Provider: {esc(service.get("provider_label") or "unknown")} · model: {esc(service.get("model") or "?")}. '
+                        f"Site owner: {esc(fix)}</span></div></div>",
                         unsafe_allow_html=True)
         else:
             st.markdown(f'<div class="offline-banner">{icon_svg("alert")}<div><strong>The analysis service is offline right now</strong>'
@@ -548,7 +559,8 @@ with st.container(key="analysis_card", border=True):
                      placeholder="Example: Node.js 18 is the current Active LTS release…",
                      label_visibility="collapsed")
         submitted = st.form_submit_button(
-            "Service offline — analysis paused" if SERVICE_DOWN else "Analyze claim",
+            ("AI model unavailable — analysis paused" if service.get("model_available") is False
+             else "Service offline — analysis paused") if SERVICE_DOWN else "Analyze claim",
             type="primary", use_container_width=True, disabled=SERVICE_DOWN,
         )
 

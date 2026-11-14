@@ -15,15 +15,18 @@ from pathlib import Path
 
 import httpx
 from dotenv import load_dotenv
-from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI
+from openai import (
+    APIConnectionError, APIStatusError, APITimeoutError, AuthenticationError, BadRequestError, NotFoundError,
+    OpenAI, PermissionDeniedError, RateLimitError,
+)
 from tavily import TavilyClient
 
 load_dotenv(dotenv_path=Path(__file__).with_name(".env"), override=True)
 log = logging.getLogger("stalebot.detector")
 
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
+# llama-3.3-70b-versatile was shut down by Groq on 2026-08-16; gpt-oss-120b is its recommended replacement.
 DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b"
-
 
 # Messages shown to visitors. Technical details go to the server log instead.
 ERR_OFFLINE = "StaleBot's analysis service is offline right now. Please try again in a minute."
@@ -58,7 +61,7 @@ def get_settings():
         "tavily_api_key": os.getenv("TAVILY_API_KEY", ""),
         "base_url": os.getenv("BIFROST_BASE_URL", "http://localhost:8080/v1"),
         "virtual_key": os.getenv("BIFROST_VIRTUAL_KEY", ""),
-        "model": os.getenv("MODEL_NAME", "groq/llama-3.3-70b-versatile"),
+        "model": os.getenv("MODEL_NAME", "groq/" + DEFAULT_GROQ_MODEL),
         "max_claims": max_claims_setting(),
         "groq_api_key": os.getenv("GROQ_API_KEY", "").strip(),
         "groq_base_url": os.getenv("GROQ_BASE_URL", "").strip() or GROQ_BASE_URL,
@@ -95,10 +98,20 @@ def client_for(route, total_timeout=45.0):
 
 
 def is_unreachable(error):
-    """Network failure, timeout, or a 5xx from the gateway (its upstream provider is down)."""
-    if isinstance(error, (APIConnectionError, APITimeoutError, TimeoutError, ConnectionError)):
+    """Temporary trouble: network failure, timeout, rate limit (429), or a 5xx from the gateway."""
+    if isinstance(error, (APIConnectionError, APITimeoutError, TimeoutError, ConnectionError, RateLimitError)):
         return True
     return isinstance(error, APIStatusError) and error.status_code >= 500
+
+
+def refusal_reason(error):
+    """Why a model endpoint refused a request — shown to the site owner so it can be fixed."""
+    if isinstance(error, (AuthenticationError, PermissionDeniedError)):
+        return "key", "The API key was rejected (invalid, revoked, or for a different provider)."
+    message = str(getattr(error, "message", "") or error).lower()
+    if isinstance(error, NotFoundError) or (isinstance(error, BadRequestError) and "model" in message):
+        return "model", "The provider doesn't offer this model name (it may be misspelled or retired)."
+    return "other", f"The provider refused the request ({type(error).__name__})."
 
 
 def check_bifrost(settings):
@@ -124,8 +137,10 @@ def check_bifrost(settings):
         except Exception as error:
             log.warning("Model route %s failed its check: %s: %s", route["name"], type(error).__name__, error)
             if not is_unreachable(error) and rejected is None:
+                reason, detail = refusal_reason(error)
                 rejected = {"state": "connected", "model_available": False, "provider": route["name"],
-                            "provider_label": route["label"], "model": route["model"]}
+                            "provider_label": route["label"], "model": route["model"],
+                            "reason": reason, "reason_detail": detail}
     return rejected or {"state": "unavailable", "model_available": None, "provider": None}
 
 
