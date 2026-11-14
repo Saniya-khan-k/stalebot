@@ -1,0 +1,19 @@
+# Secrets
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+
+# Local data (analysis history)
+data/
+*.corrupt.json
+*.tmp
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Release packages
+*.zip

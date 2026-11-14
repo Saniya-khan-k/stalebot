@@ -1,0 +1,56 @@
+# StaleBot with Docker Compose.
+#   docker compose up -d --build                       # dashboard + API on :8000
+#   docker compose --profile streamlit up -d --build   # also the Streamlit UI on :8501
+#
+# Secrets come from .env (see .env.example). Put a TLS-terminating reverse proxy (Caddy, nginx,
+# your platform's load balancer) in front before exposing this to the internet.
+services:
+  stalebot:
+    build: .
+    image: stalebot:latest
+    env_file: .env
+    environment:
+      APP_ENV: production
+      HOST: 0.0.0.0
+      PORT: "8000"
+      DATA_DIR: /data
+      # Only true when the published port is reachable *only* through your reverse proxy.
+      TRUST_PROXY: "false"
+      # Inside a container "localhost" is the container itself. Point at the gateway's real
+      # address, e.g. http://host.docker.internal:8080/v1 or http://bifrost:8080/v1.
+      BIFROST_BASE_URL: ${BIFROST_BASE_URL_DOCKER:-http://host.docker.internal:8080/v1}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      # Bound to localhost: expose it through your reverse proxy, not directly.
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - stalebot-data:/data
+    restart: unless-stopped
+
+  streamlit:
+    profiles: ["streamlit"]
+    build:
+      context: .
+      args:
+        WITH_STREAMLIT: "true"
+    image: stalebot-streamlit:latest
+    env_file: .env
+    environment:
+      APP_ENV: production
+      BIFROST_BASE_URL: ${BIFROST_BASE_URL_DOCKER:-http://host.docker.internal:8080/v1}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: ["python", "-m", "streamlit", "run", "app.py", "--server.address", "0.0.0.0",
+              "--server.port", "8501", "--server.headless", "true", "--client.showErrorDetails", "none"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8501/_stcore/health', timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    ports:
+      - "127.0.0.1:8501:8501"
+    restart: unless-stopped
+
+volumes:
+  stalebot-data:
