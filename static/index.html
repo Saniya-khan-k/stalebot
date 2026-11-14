@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>StaleBot · Stale-Answer Detector</title>
+  <meta name="description" content="StaleBot — track, analyze and verify claims with live sources. Detect stale and outdated answers.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238B5CF6' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M2 12h4l3-8 4 16 3-8h6'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/styles.css?v=7">
+  <script>
+    try { const t = JSON.parse(localStorage.getItem("vp.theme")); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; } catch (e) {}
+  </script>
+</head>
+<body>
+<div class="app">
+  <!-- ============ Sidebar ============ -->
+  <aside class="sidebar" id="sidebar" aria-label="Main navigation">
+    <div class="brand">
+      <span class="brand-mark"><svg viewBox="0 0 24 24"><path d="M2 12h4l3-8 4 16 3-8h6"/></svg></span>
+      <div>
+        <div class="brand-name">Stale<span>Bot</span></div>
+        <div class="brand-tag">Stale-answer detector</div>
+      </div>
+    </div>
+
+    <nav class="nav">
+      <button class="nav-item active" data-view="dashboard"><i data-i="dashboard"></i><span>Dashboard</span></button>
+      <button class="nav-item" data-view="analytics"><i data-i="chart"></i><span>Analytics</span></button>
+      <button class="nav-item" data-view="projects"><i data-i="folder"></i><span>Claim Projects</span></button>
+      <button class="nav-item" data-view="history"><i data-i="history"></i><span>Historical Data</span></button>
+      <button class="nav-item" data-view="settings"><i data-i="settings"></i><span>Settings</span></button>
+    </nav>
+
+    <div class="side-card">
+      <div class="side-card-head"><i data-i="gauge"></i><span>Freshness Health</span></div>
+      <div class="side-score"><b id="sideScore">—</b><small>/100 avg. score</small></div>
+      <div class="side-meter"><span id="sideMeter"></span></div>
+      <div class="side-meta" id="sideMeta">No claims analyzed yet</div>
+      <button class="btn btn-grad btn-block" id="sideRecheck" type="button"><i data-i="refresh"></i>Re-check systems</button>
+    </div>
+
+    <button class="profile" id="profileBtn" type="button" title="Edit profile in Settings">
+      <span class="avatar" id="avatar">A</span>
+      <span class="profile-text"><b id="profileName">Analyst</b><small id="profileRole">Local workspace</small></span>
+      <i data-i="chevron-right"></i>
+    </button>
+  </aside>
+  <div class="scrim" id="scrim"></div>
+
+  <!-- ============ Main ============ -->
+  <main class="main">
+    <header class="topbar">
+      <button class="icon-btn menu-btn" id="menuBtn" type="button" aria-label="Open navigation"><i data-i="menu"></i></button>
+      <div class="titles">
+        <h1 id="viewTitle">Dashboard</h1>
+        <p id="viewSub">Track, analyze and verify claims. Catch stale answers before they ship.</p>
+      </div>
+      <div class="top-actions">
+        <div class="notif-wrap">
+          <button class="icon-btn" id="bellBtn" type="button" aria-label="Stale claim alerts" aria-expanded="false"><i data-i="bell"></i><span class="bell-dot" id="bellDot" hidden></span></button>
+          <div class="popover" id="notifPanel" hidden></div>
+        </div>
+        <div class="theme-toggle" role="group" aria-label="Theme">
+          <button type="button" data-theme-set="light" aria-label="Light theme"><i data-i="sun"></i></button>
+          <button type="button" data-theme-set="dark" aria-label="Dark theme"><i data-i="moon"></i></button>
+        </div>
+      </div>
+    </header>
+
+    <!-- ---------- Dashboard ---------- -->
+    <section class="view" id="view-dashboard">
+      <div class="card analyze-card">
+        <form id="analyzeForm" autocomplete="off">
+          <button type="submit" class="analyze-btn" id="analyzeBtn">
+            <span class="ab-left"><span class="ab-icon"><i data-i="wand"></i></span><span id="analyzeLabel">Analyze Claim</span></span>
+            <span class="ab-arrow"><i data-i="arrow-right"></i></span>
+          </button>
+          <label for="claimInput" class="analyze-label">Input News Headline, AI Answer or Claim to Verify</label>
+          <div class="input-wrap">
+            <i data-i="file"></i>
+            <textarea id="claimInput" rows="1" maxlength="8000" placeholder="Enter specific claim details…  (Enter to analyze · Shift+Enter for new line)"></textarea>
+            <span class="char-count" id="charCount"></span>
+          </div>
+          <div class="input-tools">
+            <div class="chips" id="exampleChips"><span class="chips-label">Try an example:</span></div>
+            <label class="project-pick"><i data-i="folder"></i><select id="projectSelect" aria-label="Save to project"><option value="">No project</option></select></label>
+          </div>
+        </form>
+
+        <div class="status-row">
+          <button class="status-card" id="gatewayCard" type="button" title="Click to re-check the gateway">
+            <span class="sc-icon c-green"><i data-i="shield"></i></span>
+            <span class="sc-text"><small>Trusted Gateway Status</small><b id="gatewayValue" class="state">Checking…</b></span>
+            <span class="sc-hint"><i data-i="refresh"></i></span>
+          </button>
+          <div class="status-card model-card" id="modelCard">
+            <span class="sc-icon c-teal"><i data-i="cpu"></i></span>
+            <span class="sc-text"><small>Current AI Model</small>
+              <button class="model-trigger" id="modelTrigger" type="button" data-admin aria-haspopup="listbox" aria-expanded="false"><b id="modelValue">—</b><i data-i="chevron-down"></i></button>
+            </span>
+            <ul class="dropdown" id="modelMenu" role="listbox" hidden></ul>
+          </div>
+          <div class="status-card" id="searchCard">
+            <span class="sc-icon c-violet"><i data-i="search"></i></span>
+            <span class="sc-text"><small>Live Source Search</small><b id="searchValue" class="state">—</b></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card result-panel" id="resultPanel" hidden></div>
+
+      <div class="grid-3">
+        <div class="card panel">
+          <div class="panel-head">
+            <h2><i data-i="chart" class="h-icon"></i>Recent Analyses</h2>
+            <button class="link-btn" type="button" data-goto="history">View All <i data-i="arrow-right"></i></button>
+          </div>
+          <ul class="recent-list" id="recentList"></ul>
+        </div>
+
+        <div class="card panel">
+          <div class="panel-head"><h2><i data-i="pie" class="h-icon"></i>Claim Verification Overview</h2></div>
+          <div class="donut-layout">
+            <div class="donut-wrap">
+              <svg id="donut" viewBox="0 0 140 140" aria-label="Verdict distribution"></svg>
+              <div class="donut-center"><b id="donutPct">—</b><small>fresh</small></div>
+            </div>
+            <ul class="legend" id="legend"></ul>
+          </div>
+          <div class="panel-foot" id="donutFoot">Freshness rate</div>
+        </div>
+
+        <div class="card panel activity-panel">
+          <div class="panel-head">
+            <h2><i data-i="activity" class="h-icon"></i>Live Source Search Activity</h2>
+            <select class="mini-select" id="activityMetric" aria-label="Activity metric">
+              <option value="searches">Searches · 24h</option>
+              <option value="claims">Claims · 24h</option>
+            </select>
+          </div>
+          <div class="bar-chart" id="barChart"></div>
+        </div>
+      </div>
+
+      <div class="grid-3 metrics">
+        <div class="card metric">
+          <span class="m-icon c-amber"><i data-i="zap"></i></span>
+          <div class="m-body"><small>Total Claims Analyzed</small><b id="mTotal">0</b><span class="m-trend" id="mTotalTrend"></span></div>
+          <svg class="spark" id="sparkTotal" viewBox="0 0 120 44" preserveAspectRatio="none"></svg>
+        </div>
+        <div class="card metric">
+          <span class="m-icon c-violet"><i data-i="users"></i></span>
+          <div class="m-body"><small>Active Users <em>· 24h</em></small><b id="mUsers">0</b><span class="m-trend" id="mUsersTrend"></span></div>
+          <svg class="spark" id="sparkUsers" viewBox="0 0 120 44" preserveAspectRatio="none"></svg>
+        </div>
+        <div class="card metric">
+          <span class="m-icon c-teal"><i data-i="clock"></i></span>
+          <div class="m-body"><small>Avg. Response Time</small><b id="mResp">—</b><span class="m-trend" id="mRespTrend"></span></div>
+          <svg class="spark" id="sparkResp" viewBox="0 0 120 44" preserveAspectRatio="none"></svg>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------- Analytics ---------- -->
+    <section class="view" id="view-analytics" hidden>
+      <div class="kpi-row" id="kpiRow"></div>
+      <div class="grid-2">
+        <div class="card panel">
+          <div class="panel-head"><h2><i data-i="trend" class="h-icon"></i>Average Freshness Score · 14 days</h2></div>
+          <div class="line-chart" id="scoreChart"></div>
+        </div>
+        <div class="card panel">
+          <div class="panel-head"><h2><i data-i="chart" class="h-icon"></i>Claims per Day · 14 days</h2></div>
+          <div class="bar-chart tall" id="dailyChart"></div>
+        </div>
+        <div class="card panel">
+          <div class="panel-head"><h2><i data-i="pie" class="h-icon"></i>Verdict Breakdown</h2></div>
+          <div class="hbars" id="verdictBars"></div>
+        </div>
+        <div class="card panel">
+          <div class="panel-head"><h2><i data-i="cpu" class="h-icon"></i>Model Usage</h2></div>
+          <div class="hbars" id="modelBars"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------- Projects ---------- -->
+    <section class="view" id="view-projects" hidden>
+      <div class="card panel">
+        <form class="project-form" id="projectForm" autocomplete="off">
+          <input class="field" id="projectName" data-admin maxlength="80" placeholder="New project name (e.g. Q4 pricing page audit)" required>
+          <input class="field grow" id="projectDesc" data-admin maxlength="300" placeholder="Short description (optional)">
+          <button class="btn btn-grad" type="submit" data-admin><i data-i="plus"></i>Create project</button>
+        </form>
+      </div>
+      <div class="project-grid" id="projectGrid"></div>
+      <div class="card panel" id="projectDetail" hidden></div>
+    </section>
+
+    <!-- ---------- History ---------- -->
+    <section class="view" id="view-history" hidden>
+      <div class="card panel">
+        <div class="toolbar">
+          <label class="search-field"><i data-i="search"></i><input id="historySearch" type="search" placeholder="Search claims…"></label>
+          <select class="field" id="historyVerdict" aria-label="Filter by verdict"><option value="">All verdicts</option></select>
+          <select class="field" id="historyProject" aria-label="Filter by project"><option value="">All projects</option></select>
+          <span class="spacer"></span>
+          <button class="btn btn-ghost" id="exportCsv" type="button"><i data-i="download"></i>Export CSV</button>
+        </div>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead><tr><th>When</th><th>Claim</th><th>Verdict</th><th>Score</th><th class="hide-sm">Model</th><th class="hide-sm">Project</th><th></th></tr></thead>
+            <tbody id="historyBody"></tbody>
+          </table>
+        </div>
+        <div class="table-foot" id="historyFoot"></div>
+      </div>
+    </section>
+
+    <!-- ---------- Settings ---------- -->
+    <section class="view" id="view-settings" hidden>
+      <div class="grid-2">
+        <div class="card panel">
+          <div class="panel-head"><h2><i data-i="shield" class="h-icon"></i>AI Gateway (Bifrost)</h2></div>
+          <dl class="kv" id="gatewayKv"></dl>
+          <label class="field-label" for="settingsModel">Model used for analysis</label>
+          <select class="field" id="settingsModel" data-admin></select>
+          <div class="row-actions"><button class="btn btn-grad" id="testGateway" type="button"><i data-i="refresh"></i>Test connection</button><span class="muted" id="testResult"></span></div>
+        </div>
+        <div class="card panel">
+          <div class="panel-head"><h2><i data-i="globe" class="h-icon"></i>Live Source Search (Tavily)</h2></div>
+          <dl class="kv" id="searchKv"></dl>
+          <p class="muted small">API keys are read from <code>.env</code> on the server and never sent to the browser.</p>
+        </div>
+        <div class="card panel">
+          <div class="panel-head"><h2><i data-i="shield" class="h-icon"></i>Access</h2></div>
+          <dl class="kv" id="accessKv"></dl>
+          <form id="accessForm" autocomplete="off">
+            <label class="field-label" for="accessKeyInput">Access or admin key</label>
+            <input class="field" id="accessKeyInput" type="password" maxlength="200" placeholder="Paste a key to unlock more" style="width:100%">
+            <div class="row-actions">
+              <button class="btn btn-grad" type="submit">Save key</button>
+              <button class="btn btn-ghost" type="button" id="accessClear">Forget key</button>
+              <span class="muted small" id="accessSaved"></span>
+            </div>
+          </form>
+        </div>
+        <div class="card panel">
+          <div class="panel-head"><h2><i data-i="user" class="h-icon"></i>Profile</h2></div>
+          <form id="profileForm" autocomplete="off">
+            <label class="field-label" for="pfName">Display name</label>
+            <input class="field" id="pfName" maxlength="40">
+            <label class="field-label" for="pfRole">Role / team</label>
+            <input class="field" id="pfRole" maxlength="40">
+            <div class="row-actions"><button class="btn btn-grad" type="submit">Save profile</button></div>
+          </form>
+        </div>
+        <div class="card panel">
+          <div class="panel-head"><h2><i data-i="settings" class="h-icon"></i>Appearance &amp; Data</h2></div>
+          <label class="field-label">Theme</label>
+          <div class="seg" id="themeSeg">
+            <button type="button" data-theme-set="dark"><i data-i="moon"></i>Dark</button>
+            <button type="button" data-theme-set="light"><i data-i="sun"></i>Light</button>
+          </div>
+          <dl class="kv" id="dataKv"></dl>
+          <div class="row-actions">
+            <button class="btn btn-ghost" id="exportJson" type="button"><i data-i="download"></i>Export JSON</button>
+            <button class="btn btn-danger" id="clearHistory" type="button" data-admin><i data-i="trash"></i>Clear history</button>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div class="modal" id="modal" hidden>
+  <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <div class="modal-head"><h3 id="modalTitle"></h3><button class="icon-btn" type="button" data-close aria-label="Close"><i data-i="x"></i></button></div>
+    <div class="modal-body" id="modalBody"></div>
+  </div>
+</div>
+<div class="tooltip" id="tooltip" role="tooltip" hidden></div>
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<script src="/static/app.js?v=7"></script>
+</body>
+</html>
